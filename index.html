@@ -1,0 +1,1420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>[DQ9] Spawn Node Tool</title>
+    <style>
+        body {
+            font-family: monospace;
+            background-color: #1e1e1e;
+            color: #d4d4d4;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        h2 { align-self: flex-start; margin: 0 0 15px 0; }
+        .panel {
+            background-color: #2d2d2d;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            display: inline-block;
+        }
+        label { margin-right: 15px; font-size: 16px; }
+        input {
+            background: #1e1e1e;
+            border: 1px solid #555;
+            color: #fff;
+            padding: 6px 8px;
+            font-family: monospace;
+            font-size: 16px;
+        }
+        .grid-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(16, 64px);
+            grid-template-rows: repeat(16, 64px);
+            gap: 0;
+            background-color: #fff000;
+            border: none;
+            padding: 0;
+        }
+        .grid-wrapper {
+            position: relative;
+            width: 1024px;
+            height: 1024px;
+        }
+        .grid-wrapper::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            background-image:
+                repeating-linear-gradient(to right, transparent 0, transparent 62px, rgba(0,0,0,1) 62px, rgba(0,0,0,1) 64px),
+                repeating-linear-gradient(to bottom, transparent 0, transparent 62px, rgba(0,0,0,1) 62px, rgba(0,0,0,1) 64px);
+        }
+        #overlapCanvas, #overlay {
+            position: absolute;
+            left: -1px;
+            top: -1px;
+            pointer-events: none;
+            z-index: 1;
+        }
+        #overlay { z-index: 2; }
+        #overlay circle, #overlay line {
+            pointer-events: visiblePainted;
+        }
+        .sprite-cell {
+            position: relative;
+            width: 64px;
+            height: 64px;
+            background-repeat: no-repeat;
+            background-color: #e6ac43;
+            image-rendering: pixelated;
+        }
+        .sprite-cell::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            pointer-events: none;
+            background-image:
+                repeating-linear-gradient(to right, transparent 0, transparent 7px, rgba(50,50,50,.6) 7px, rgba(50,50,50,.6) 8px),
+                repeating-linear-gradient(to bottom, transparent 0, transparent 7px, rgba(50,50,50,.6) 7px, rgba(50,50,50,.6) 8px);
+        }
+        .sprite-cell.unknown {
+            font-size: 12px;
+            font-family: monospace;
+            font-weight: bold;
+            color: #fff;
+            background-color: #ff0000;
+        }
+    </style>
+</head>
+<body>
+    <div class="panel">
+        <label>Map Seed: <input type="text" id="mapSeed" value="0032" size="4" maxlength="4"></label>
+        <label>Floor: <input type="number" id="floor" min="1" max="16" value="1" style="width: 50px;"></label>
+    </div>
+
+    <div class="grid-container">
+        <div class="grid-wrapper">
+            <div class="grid" id="spriteGrid"></div>
+            <canvas id="overlapCanvas" width="1024" height="1024"></canvas>
+            <svg id="overlay" width="1024" height="1024" viewBox="0 0 1024 1024"></svg>
+        </div>
+    </div>
+
+    <script>
+        // ============================================================
+        // SECTION 1: FLOOR / BITFIELD GENERATION
+        // (adapted from the floor generation script — map + bitfield
+        //  canvases removed, everything else preserved as-is)
+        // ============================================================
+
+        // --- LCG Random Number Generator & Debug Counters ---
+        let lcg_seed = 0;
+        let lcg_call_count = 0;
+
+        function set_seed(val) {
+            lcg_seed = val >>> 0;
+        }
+
+        // --- Floor Size Logic ---
+        function getFloorSize(mapSeed, floor) {
+            let val = (mapSeed + floor) >>> 0;
+            if (floor <= 4) return (val % 5) + 10;
+            if (floor <= 8) return (val % 4) + 12;
+            if (floor <= 12) return (val % 3) + 14;
+            return 16;
+        }
+
+        // --- Map Constants & Structures ---
+        const TILE_ROOM = 0;
+        const TILE_WALL = 1;
+        const TILE_CORRIDOR = 2;
+        const TILE_DIVIDER = 3;
+        const TILE_UP_STAIRS = 4;
+        const TILE_DOWN_STAIRS = 5;
+        const TILE_CHEST = 6;
+        const TILE_NODE = 8;
+
+        let mapWidth = 16;
+        let mapHeight = 16;
+        let mapGrid = [];
+        let bitfieldGrid = [];
+        let mapContext = null;
+        let rngContext = "";
+        let writes = 0;
+        let global_seed = 0
+
+        class Context {
+            constructor(m, f, w, h) {
+                this.field_0 = {
+                    mapseed: m,
+                    floor: f,
+                    width: w,
+                    height: h
+                };
+                this.field_8 = 0;
+                this.field_C = 0;
+                this.field_10 = 0;
+                this.field_314 = 0;
+
+                this.field_14 = [];
+                this.field_D4 = [];
+                this.field_1D4 = [];
+
+                let initialArea = new Int8Array(12);
+                initialArea[0] = 1;
+                initialArea[1] = 1;
+                initialArea[2] = w - 2;
+                initialArea[3] = h - 2;
+                initialArea[4] = 0;
+                initialArea[5] = 0;
+                this.field_14.push(initialArea);
+            }
+        }
+
+        // --- Core Helpers ---
+
+        function s8(v) {
+            return (v << 24) >> 24;
+        }
+
+        function FUN_0209291c(grid, x, y, val) {
+            writes = writes + 1;
+            if (x >= 0 && y >= 0 && y < grid.length && x < grid[y].length) {
+                grid[y][x] = val & 0xFF;
+            }
+        }
+
+        function FUN_02092934(context, x, y) {
+            if (x < 0 || y < 0 || y >= mapHeight || x >= mapWidth) {
+                return -1;
+            }
+            return mapGrid[y][x];
+        }
+
+        function FUN_02092614(min, max) {
+            if (min === max) return min;
+
+            let rand_val = FUN_02003d14();
+            global_seed = rand_val
+            let range = max - min + 1;
+
+            if (range <= 0) return min;
+
+            return min + (rand_val % range);
+        }
+
+        function FUN_02003d14() {
+            lcg_call_count++;
+            let mult = 0x41C64E6D;
+            let add = 0x39;
+            lcg_seed = (Math.imul(lcg_seed, mult) + add + 0x3000) >>> 0;
+            let val = (lcg_seed >>> 16) & 0x7FFF;
+            return val;
+        }
+
+        function FUN_02090860(r0) { return r0[3] - r0[1] + 1; }
+        function FUN_02090860_Width(structPtr) { return structPtr[2] - structPtr[0] + 1; }
+
+        // --- Node / Door Placement (FUN_020922fc) ---
+        function FUN_020922fc(context, room) {
+            let x1 = room[0]; let y1 = room[1];
+            let x2 = room[2]; let y2 = room[3];
+            let width = FUN_02090860_Width(room);
+            let height = FUN_02090860(room);
+
+            if (width < 5) {
+                let top_x = FUN_02092614(x1, x2);
+                room[12] = top_x; room[13] = y1;
+                FUN_0209291c(mapGrid, top_x, y1, TILE_NODE);
+
+                let bot_x = FUN_02092614(x1, x2);
+                room[16] = bot_x; room[17] = y2;
+                FUN_0209291c(mapGrid, bot_x, y2, TILE_NODE);
+            } else {
+                let mid_x = x1 + Math.floor(width / 2) - 1;
+
+                let top1_x = FUN_02092614(x1, mid_x);
+                room[12] = top1_x; room[13] = y1;
+                FUN_0209291c(mapGrid, top1_x, y1, TILE_NODE);
+
+                let top2_x = FUN_02092614(mid_x + 1, x2);
+                room[14] = top2_x; room[15] = y1;
+                FUN_0209291c(mapGrid, top2_x, y1, TILE_NODE);
+
+                let bot1_x = FUN_02092614(x1, mid_x);
+                room[16] = bot1_x; room[17] = y2;
+                FUN_0209291c(mapGrid, bot1_x, y2, TILE_NODE);
+
+                let bot2_x = FUN_02092614(mid_x + 1, x2);
+                room[18] = bot2_x; room[19] = y2;
+                FUN_0209291c(mapGrid, bot2_x, y2, TILE_NODE);
+            }
+
+            if (height < 5) {
+                let left_y = FUN_02092614(y1, y2);
+                room[4] = x1; room[5] = left_y;
+                FUN_0209291c(mapGrid, x1, left_y, TILE_NODE);
+
+                let right_y = FUN_02092614(y1, y2);
+                room[8] = x2; room[9] = right_y;
+                FUN_0209291c(mapGrid, x2, right_y, TILE_NODE);
+            } else {
+                let mid_y = y1 + Math.floor(height / 2) - 1;
+
+                let left1_y = FUN_02092614(y1, mid_y);
+                room[4] = x1; room[5] = left1_y;
+                FUN_0209291c(mapGrid, x1, left1_y, TILE_NODE);
+
+                let left2_y = FUN_02092614(mid_y + 1, y2);
+                room[6] = x1; room[7] = left2_y;
+                FUN_0209291c(mapGrid, x1, left2_y, TILE_NODE);
+
+                let right1_y = FUN_02092614(y1, mid_y);
+                room[8] = x2; room[9] = right1_y;
+                FUN_0209291c(mapGrid, x2, right1_y, TILE_NODE);
+
+                let right2_y = FUN_02092614(mid_y + 1, y2);
+                room[10] = x2; room[11] = right2_y;
+                FUN_0209291c(mapGrid, x2, right2_y, TILE_NODE);
+            }
+        }
+
+        // --- Room Transformation (FUN_02090b8c) ---
+        function FUN_02090b8c(context, room, area) {
+            let outer = area; let inner = room;
+            let x1 = inner[0]; let y1 = inner[1];
+            let x2 = inner[2]; let y2 = inner[3];
+
+            let width  = x2 - x1 + 1; let height = y2 - y1 + 1;
+            let half_w = s8(Math.floor(width / 2));
+            let half_h = s8(Math.floor(height / 2));
+
+            let max_extrude_up, max_extrude_down, max_extrude_left, max_extrude_right;
+
+            if (context.field_314 !== 0) {
+                max_extrude_down  = outer[3] - y2;
+                max_extrude_up    = y1 - outer[1];
+                max_extrude_left  = x1 - outer[0];
+                max_extrude_right = outer[2] - x2;
+            } else {
+                let do_transform = FUN_02092614(0, 15);
+                if (do_transform !== 0) {
+                    max_extrude_down  = outer[3] - y2;
+                    max_extrude_up    = y1 - outer[1];
+                    max_extrude_left  = x1 - outer[0];
+                    max_extrude_right = outer[2] - x2;
+                } else {
+                    max_extrude_up    = y1 - 1;
+                    max_extrude_down  = context.field_0.height - y2 - 1;
+                    max_extrude_left  = x1 - 1;
+                    max_extrude_right = context.field_0.width - x2 - 1;
+                    context.field_314 = 1;
+                }
+            }
+
+            max_extrude_up = s8(max_extrude_up); max_extrude_down = s8(max_extrude_down);
+            max_extrude_left = s8(max_extrude_left); max_extrude_right = s8(max_extrude_right);
+
+            // 1. Top Edge
+            for (let x = x1; x <= x2; x++) {
+                let tile = FUN_02092934(mapGrid, x, y1);
+                if (tile === 1 || tile === 3) continue;
+
+                let dir = FUN_02092614(0, 1);
+                if (dir !== 0) {
+                    let amt = FUN_02092614(0, max_extrude_up) & 0xff;
+                    for (let i = 0; i < amt; i++) {
+                        let ty = y1 - 1 - i;
+                        if (FUN_02092934(mapGrid, x, ty) === 8) continue;
+                        FUN_0209291c(mapGrid, x, ty, 0);
+                    }
+                } else {
+                    if (tile === 8) continue;
+                    let tileAbove = FUN_02092934(mapGrid, x, y1 - 1);
+                    if (tileAbove === 1 || tileAbove === 8) continue;
+
+                    let amt = FUN_02092614(0, half_h) & 0xff;
+                    let leftX = x - 1;
+                    for (let i = 0; i < amt; i++) {
+                        let ty = y1 + i;
+                        if (FUN_02092934(mapGrid, x, ty) === 8) break;
+                        if (FUN_02092934(mapGrid, x, ty + 1) === 1) break;
+                        if (FUN_02092934(mapGrid, x + 1, ty) !== 1) if (FUN_02092934(mapGrid, x + 1, ty + 1) === 1) break;
+                        if (FUN_02092934(mapGrid, leftX, ty) !== 1) if (FUN_02092934(mapGrid, leftX, ty + 1) === 1) break;
+                        FUN_0209291c(mapGrid, x, ty, 1);
+                    }
+                }
+            }
+
+            // 2. Bottom Edge
+            for (let x = x1; x <= x2; x++) {
+                let tile = FUN_02092934(mapGrid, x, y2);
+                if (tile === 1 || tile === 3) continue;
+
+                let dir = FUN_02092614(0, 1);
+                if (dir !== 0) {
+                    let amt = FUN_02092614(0, max_extrude_down) & 0xff;
+                    for (let i = 0; i < amt; i++) {
+                        let ty = y2 + 1 + i;
+                        if (FUN_02092934(mapGrid, x, ty) === 8) continue;
+                        FUN_0209291c(mapGrid, x, ty, 0);
+                    }
+                } else {
+                    if (tile === 8) continue;
+                    let tileBelow = FUN_02092934(mapGrid, x, y2 + 1);
+                    if (tileBelow === 1 || tileBelow === 8) continue;
+
+                    let amt = FUN_02092614(0, half_h) & 0xff;
+                    let leftX = x - 1;
+                    for (let i = 0; i < amt; i++) {
+                        let ty = y2 - i;
+                        if (FUN_02092934(mapGrid, x, ty) === 8) break;
+                        if (FUN_02092934(mapGrid, x, ty - 1) === 1) break;
+                        if (FUN_02092934(mapGrid, x + 1, ty) !== 1) if (FUN_02092934(mapGrid, x + 1, ty - 1) === 1) break;
+                        if (FUN_02092934(mapGrid, leftX, ty) !== 1) if (FUN_02092934(mapGrid, leftX, ty - 1) === 1) break;
+                        FUN_0209291c(mapGrid, x, ty, 1);
+                    }
+                }
+            }
+
+            // 3. Left Edge
+            for (let y = y1; y <= y2; y++) {
+                let tile = FUN_02092934(mapGrid, x1, y);
+                if (tile === 1 || tile === 3) continue;
+
+                let dir = FUN_02092614(0, 1);
+                if (dir !== 0) {
+                    let amt = FUN_02092614(0, max_extrude_left) & 0xff;
+                    for (let i = 0; i < amt; i++) {
+                        let tx = x1 - 1 - i;
+                        if (FUN_02092934(mapGrid, tx, y) === 8) continue;
+                        FUN_0209291c(mapGrid, tx, y, 0);
+                    }
+                } else {
+                    if (tile === 8) continue;
+                    let tileLeft = FUN_02092934(mapGrid, x1 - 1, y);
+                    if (tileLeft === 1 || tileLeft === 8) continue;
+
+                    let amt = FUN_02092614(0, half_w) & 0xff;
+                    let topY = y - 1;
+                    for (let i = 0; i < amt; i++) {
+                        let tx = x1 + i;
+                        if (FUN_02092934(mapGrid, tx, y) === 8) break;
+                        if (FUN_02092934(mapGrid, tx + 1, y) === 1) break;
+                        if (FUN_02092934(mapGrid, tx, y + 1) !== 1) if (FUN_02092934(mapGrid, tx + 1, y + 1) === 1) break;
+                        if (FUN_02092934(mapGrid, tx, topY) !== 1) if (FUN_02092934(mapGrid, tx + 1, topY) === 1) break;
+                        FUN_0209291c(mapGrid, tx, y, 1);
+                    }
+                }
+            }
+
+            // 4. Right Edge
+            for (let y = y1; y <= y2; y++) {
+                let tile = FUN_02092934(mapGrid, x2, y);
+                if (tile === 1 || tile === 3) continue;
+
+                let dir = FUN_02092614(0, 1);
+                if (dir !== 0) {
+                    let amt = FUN_02092614(0, max_extrude_right) & 0xff;
+                    for (let i = 0; i < amt; i++) {
+                        let tx = x2 + 1 + i;
+                        if (FUN_02092934(mapGrid, tx, y) === 8) continue;
+                        FUN_0209291c(mapGrid, tx, y, 0);
+                    }
+                } else {
+                    if (tile === 8) continue;
+                    let tileRight = FUN_02092934(mapGrid, y1 + 1, y);
+                    if (tileRight === 1 || tileRight === 8) continue;
+
+                    let amt = FUN_02092614(0, half_w) & 0xff;
+                    let topY = y - 1;
+                    for (let i = 0; i < amt; i++) {
+                        let tx = x2 - i;
+                        if (FUN_02092934(mapGrid, tx, y) === 8) break;
+                        if (FUN_02092934(mapGrid, tx - 1, y) === 1) break;
+                        if (FUN_02092934(mapGrid, tx, y + 1) !== 1) if (FUN_02092934(mapGrid, tx - 1, y + 1) === 1) break;
+                        if (FUN_02092934(mapGrid, tx, topY) !== 1) if (FUN_02092934(mapGrid, tx - 1, topY) === 1) break;
+                        FUN_0209291c(mapGrid, tx, y, 1);
+                    }
+                }
+            }
+        }
+
+         // Rooms
+        function FUN_0209096c(context, areaPtr) {
+            let area_x1 = areaPtr[0]; let area_y1 = areaPtr[1];
+            let area_x2 = areaPtr[2]; let area_y2 = areaPtr[3];
+
+            let width = area_x2 - area_x1 + 1;
+            if (width < 3) return 0;
+            let height = area_y2 - area_y1 + 1;
+            if (height < 3) return 0;
+
+            let rand1 = FUN_02092614(0, 1);
+            let new_x1, new_y1;
+            if (rand1 !== 0) {
+                let third_w = Math.floor(width / 3);
+                new_x1 = FUN_02092614(area_x1, area_x1 + third_w);
+                let third_h = Math.floor(height / 3);
+                new_y1 = FUN_02092614(area_y1, area_y1 + third_h);
+            } else {
+                let third_w = Math.floor(width / 3);
+                new_x1 = FUN_02092614(area_x1 + 1, area_x1 + third_w);
+                let third_h = Math.floor(height / 3);
+                new_y1 = FUN_02092614(area_y1 + 1, area_y1 + third_h);
+            }
+
+            let rand2 = FUN_02092614(0, 1);
+            let new_x2, new_y2;
+            if (rand2 !== 0) {
+                let third_w = Math.floor(width / 3);
+                new_x2 = FUN_02092614(area_x1 + (third_w * 2), area_x2);
+                let third_h = Math.floor(height / 3);
+                new_y2 = FUN_02092614(area_y1 + (third_h * 2), area_y2);
+            } else {
+                let third_w = Math.floor(width / 3);
+                new_x2 = FUN_02092614(area_x1 + (third_w * 2), area_x2 - 1);
+                let third_h = Math.floor(height / 3);
+                new_y2 = FUN_02092614(area_y1 + (third_h * 2), area_y2 - 1);
+            }
+
+            let newRoom = new Int8Array(20);
+            newRoom[0] = new_x1; newRoom[1] = new_y1;
+            newRoom[2] = new_x2; newRoom[3] = new_y2;
+
+            const roomIndex = context.field_1D4.length;
+            context.field_1D4.push(newRoom);
+            areaPtr.roomIndex = roomIndex;
+
+            for (let y = new_y1; y <= new_y2; y++) {
+                for (let x = new_x1; x <= new_x2; x++) {
+                    FUN_0209291c(mapGrid, x, y, TILE_ROOM);
+                }
+            }
+
+            FUN_020922fc(context, newRoom);
+            return 1;
+        }
+
+        // --- Split Functions ---
+        function FUN_0209076c(context, areaPtr) {
+            let x1 = areaPtr[0], x2 = areaPtr[2];
+            let width = x2 - x1 + 1;
+
+            if (width < 7) return 0;
+            if (areaPtr[5] !== 0) return 0;
+
+            let max_val = width - 6;
+            let offset = FUN_02092614(0, max_val - 1);
+            let split_x = x1 + 3 + offset;
+            let y1 = areaPtr[1], y2 = areaPtr[3];
+
+            for (let y = y1; y <= y2; y++) FUN_0209291c(mapGrid, split_x, y, TILE_DIVIDER);
+
+            let newArea = new Int8Array(12);
+            newArea[0] = split_x + 1; newArea[1] = y1;
+            newArea[2] = x2; newArea[3] = y2;
+            newArea[4] = 0; newArea[5] = 0;
+            context.field_14.push(newArea);
+
+            areaPtr[2] = split_x - 1;
+            areaPtr[5] = 1;
+
+            context.field_D4.push({ split_x: split_x, split_y: 0, area1: areaPtr, area2: newArea, split_dir: 2 });
+            return 1;
+        }
+
+        function FUN_02090874(context, areaPtr) {
+            let y1 = areaPtr[1], y2 = areaPtr[3];
+            let height = y2 - y1 + 1;
+
+            if (height < 7) return 0;
+            if (areaPtr[4] !== 0) return 0;
+
+            let max_val = height - 6;
+            let offset = FUN_02092614(0, max_val - 1);
+            let split_y = y1 + 3 + offset;
+            let x1 = areaPtr[0], x2 = areaPtr[2];
+
+            for (let x = x1; x <= x2; x++) FUN_0209291c(mapGrid, x, split_y, TILE_DIVIDER);
+
+            let newArea = new Int8Array(12);
+            newArea[0] = x1; newArea[1] = split_y + 1;
+            newArea[2] = x2; newArea[3] = y2;
+            newArea[4] = 0; newArea[5] = 0;
+            context.field_14.push(newArea);
+
+            areaPtr[3] = split_y - 1;
+            areaPtr[4] = 1;
+
+            context.field_D4.push({ split_x: 0, split_y: split_y, area1: areaPtr, area2: newArea, split_dir: 1 });
+            return 1;
+        }
+
+        function FUN_0209060c(context, areaPtr) {
+            if (context.field_8 >= 15) return;
+
+            if (areaPtr[5] !== 0) {
+                if (FUN_02090874(context, areaPtr) === 0) return;
+                goto_split_success(context, areaPtr); return;
+            }
+            if (areaPtr[4] !== 0) {
+                if (FUN_0209076c(context, areaPtr) === 0) return;
+                goto_split_success(context, areaPtr); return;
+            }
+
+            let rand_val = FUN_02003d14();
+            let r1 = (rand_val >> 31) & 1;
+            let bit = (r1 + ((rand_val ^ r1) & 1)) & 1;
+
+            let res = (bit === 0) ? FUN_02090874(context, areaPtr) : FUN_0209076c(context, areaPtr);
+            if (res === 0) return;
+
+            goto_split_success(context, areaPtr);
+        }
+
+        function goto_split_success(context, oldAreaPtr) {
+            context.field_8++;
+            context.field_C++;
+
+            let newAreaPtr = context.field_14[context.field_14.length - 1];
+            let rand_bit = FUN_02003d14() & 1;
+
+            if (rand_bit !== 0) {
+                FUN_0209060c(context, oldAreaPtr); FUN_0209060c(context, newAreaPtr);
+            } else {
+                FUN_0209060c(context, newAreaPtr); FUN_0209060c(context, oldAreaPtr);
+            }
+        }
+
+        // --- CORRIDOR GENERATION ---
+
+        function FUN_0209162c(context, room1, offset1, room2, offset2, splitData, param_5) {
+            let r1x = room1[offset1];
+            let r1y = room1[offset1 + 1];
+            let r2x = room2[offset2];
+            let r2y = room2[offset2 + 1];
+
+            // Missing node check
+            if (r1x === 0 || r1y === 0 || r2x === 0 || r2y === 0) return 0;
+
+            if (splitData.split_dir === 1) { // Horizontal Split (Y)
+                let split_y = splitData.split_y;
+
+                // Draw down from r1 (Top room)
+                for (let r9 = r1y + 1; r9 <= split_y; r9++) {
+                    FUN_0209291c(mapGrid, r1x, r9, TILE_CORRIDOR);
+                }
+
+                // Draw up from r2 (Bottom room)
+                for (let r9 = r2y - 1; r9 > split_y; r9--) {
+                    FUN_0209291c(mapGrid, r2x, r9, TILE_CORRIDOR);
+                }
+
+                // Connect along the split_y axis
+                let min_x = Math.min(r1x, r2x);
+                let max_x = Math.max(r1x, r2x);
+
+                for (let r9 = min_x; r9 <= max_x; r9++) {
+                    FUN_0209291c(mapGrid, r9, split_y, TILE_CORRIDOR);
+                }
+
+                // Loop Raycasting
+                if (param_5) {
+                    // Cast Right
+                    for (let tx = max_x + 1; tx < 16; tx++) {
+                        let tile = FUN_02092934(context, tx, split_y);
+                        if (tile !== 1 && tile !== 3 && tile !== -1) {
+                            for (let x = max_x + 1; x < tx; x++) {
+                                FUN_0209291c(mapGrid, x, split_y, TILE_CORRIDOR);
+                            }
+                            break;
+                        }
+                    }
+
+                    // Cast Left
+                    for (let tx = min_x - 1; tx >= 0; tx--) {
+                        let tile = FUN_02092934(context, tx, split_y);
+                        if (tile !== 1 && tile !== 3 && tile !== -1) {
+                            for (let x = min_x - 1; x > tx; x--) {
+                                FUN_0209291c(mapGrid, x, split_y, TILE_CORRIDOR);
+                            }
+                            break;
+                        }
+                    }
+                }
+            } else if (splitData.split_dir === 2) { // Vertical Split (X)
+                let split_x = splitData.split_x;
+
+                // Draw right from r1 (Left room)
+                for (let r9 = r1x + 1; r9 <= split_x; r9++) {
+                    FUN_0209291c(mapGrid, r9, r1y, TILE_CORRIDOR);
+                }
+
+                // Draw left from r2 (Right room)
+                for (let r9 = r2x - 1; r9 > split_x; r9--) {
+                    FUN_0209291c(mapGrid, r9, r2y, TILE_CORRIDOR);
+                }
+
+                // Connect along the split_x axis
+                let min_y = Math.min(r1y, r2y);
+                let max_y = Math.max(r1y, r2y);
+
+                for (let r9 = min_y; r9 <= max_y; r9++) {
+                    FUN_0209291c(mapGrid, split_x, r9, TILE_CORRIDOR);
+                }
+
+                // Loop Raycasting
+                if (param_5) {
+                    // Cast Down
+                    for (let ty = max_y + 1; ty < 16; ty++) {
+                        let tile = FUN_02092934(context, split_x, ty);
+                        if (tile !== 1 && tile !== 3 && tile !== -1) {
+                            for (let y = max_y + 1; y < ty; y++) {
+                                FUN_0209291c(mapGrid, split_x, y, TILE_CORRIDOR);
+                            }
+                            break;
+                        }
+                    }
+
+                    // Cast Up
+                    for (let ty = min_y - 1; ty >= 0; ty--) {
+                        let tile = FUN_02092934(context, split_x, ty);
+                        if (tile !== 1 && tile !== 3 && tile !== -1) {
+                            for (let y = min_y - 1; y > ty; y--) {
+                                FUN_0209291c(mapGrid, split_x, y, TILE_CORRIDOR);
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+            return 1;
+        }
+
+        function FUN_02091448(context, splitData) {
+            let split_dir = splitData.split_dir;
+            let room1 = context.field_1D4[splitData.area1.roomIndex];
+            let room2 = context.field_1D4[splitData.area2.roomIndex];
+
+            if (split_dir === 1) { // Y-Split (Top/Bottom Area)
+                let rand1 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 16, room2, 12, splitData, rand1); // Bot 1 -> Top 1
+
+                let rand2 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 18, room2, 12, splitData, rand2); // Bot 2 -> Top 1
+
+                let rand3 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 16, room2, 14, splitData, rand3); // Bot 1 -> Top 2
+
+                let rand4 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 18, room2, 14, splitData, rand4); // Bot 2 -> Top 2
+
+            } else if (split_dir === 2) { // X-Split (Left/Right Area)
+                let rand1 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 8, room2, 4, splitData, rand1);   // Right 1 -> Left 1
+
+                let rand2 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 10, room2, 4, splitData, rand2);  // Right 2 -> Left 1
+
+                let rand3 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 8, room2, 6, splitData, rand3);   // Right 1 -> Left 2
+
+                let rand4 = FUN_02092614(0, 7) === 0 ? 1 : 0;
+                FUN_0209162c(context, room1, 10, room2, 6, splitData, rand4);  // Right 2 -> Left 2
+            }
+            return 1;
+        }
+
+        function FUN_0209277c(context, x, y) {
+            const SOLID = t => (t === TILE_WALL || t === TILE_DIVIDER) ? 1 : 0;
+
+            const center = FUN_02092934(context, x, y);
+
+            // reject walls/dividers
+            if (center === TILE_WALL || center === TILE_DIVIDER)
+                return 0xFF;
+
+            let mask = 0;
+
+            const nw = SOLID(FUN_02092934(context, x - 1, y - 1));
+            const w  = SOLID(FUN_02092934(context, x - 1, y));
+            const sw = SOLID(FUN_02092934(context, x - 1, y + 1));
+
+            const n  = SOLID(FUN_02092934(context, x,     y - 1));
+            const s  = SOLID(FUN_02092934(context, x,     y + 1));
+
+            const ne = SOLID(FUN_02092934(context, x + 1, y - 1));
+            const e  = SOLID(FUN_02092934(context, x + 1, y));
+            const se = SOLID(FUN_02092934(context, x + 1, y + 1));
+
+            if (nw) mask |= 0x80;
+            if (ne) mask |= 0x20;
+            if (se) mask |= 0x08;
+            if (sw) mask |= 0x02;
+
+            if (n) { mask |= 0x40; mask |= 0x80 | 0x20; }
+            if (s) { mask |= 0x04; mask |= 0x08 | 0x02; }
+            if (w) { mask |= 0x01; mask |= 0x80 | 0x02; }
+            if (e) { mask |= 0x10; mask |= 0x20 | 0x08; }
+
+            return mask & 0xFF;
+        }
+
+        function FUN_02091bc0(context) {
+            const rooms = context.field_1D4;
+            const roomCount = rooms.length;
+
+            if (roomCount === 0)
+                return;
+
+            const badMasks = new Set([
+                0xEA, 0xAB, 0xAE, 0xBA,
+                0xA3, 0x8E, 0x3A, 0xE8,
+                0xB8, 0xE2, 0x8B, 0x2E
+            ]);
+
+            const isWallOrDivider = t =>
+                t === TILE_WALL || t === TILE_DIVIDER;
+
+            let failCount = 0;
+            let downRoomRetry = 0;
+
+            // LAB_02091bd4
+            outerLoop:
+            while (true) {
+                //----------------------------------------------------------
+                // Pick UP stairs
+                //----------------------------------------------------------
+                let upRoomIndex = FUN_02092614(0, roomCount - 1);
+                const room = rooms[upRoomIndex];
+
+                let upX = FUN_02092614(room[0], room[2]);
+                let upY = FUN_02092614(room[1], room[3]);
+
+                if (failCount < 100) {
+                    const north = isWallOrDivider(FUN_02092934(context, upX, upY - 1));
+                    const south = isWallOrDivider(FUN_02092934(context, upX, upY + 1));
+                    const west  = isWallOrDivider(FUN_02092934(context, upX - 1, upY));
+                    const east  = isWallOrDivider(FUN_02092934(context, upX + 1, upY));
+
+                    if (north && south && west && east) {
+                        failCount++;
+                        continue outerLoop;
+                    }
+
+                    // Reject inside corners.
+                    if ((north && east) || (north && west) || (south && east) || (south && west)) {
+                        failCount++;
+                        continue outerLoop;
+                    }
+
+                    const mask = FUN_0209277c(context, upX, upY);
+                    if (badMasks.has(mask)) {
+                        failCount++;
+                        continue outerLoop;
+                    }
+                }
+
+                FUN_0209291c(mapGrid, upX, upY, TILE_UP_STAIRS);
+                rooms[upRoomIndex][16] = upX;
+                rooms[upRoomIndex][17] = upY;
+
+                // After placing UP stairs successfully, failCount resets
+                failCount = 0;
+
+                //----------------------------------------------------------
+                // Pick DOWN stairs
+                //----------------------------------------------------------
+                let downRoomIndex, downX, downY;
+
+                // LAB_02091ec8
+                innerDownLoop:
+                while (true) {
+                    while (true) {
+                        downRoomIndex = FUN_02092614(0, roomCount - 1);
+                        if (downRoomIndex === upRoomIndex && downRoomRetry < 25) {
+                            downRoomRetry++;
+                            continue;
+                        }
+                        break;
+                    }
+
+                    const dRoom = rooms[downRoomIndex];
+                    downX = FUN_02092614(dRoom[0], dRoom[2]);
+                    downY = FUN_02092614(dRoom[1], dRoom[3]);
+
+                    // Only retry the DOWN stairs coords if they landed exactly on the UP stairs
+                    if (downRoomIndex === upRoomIndex && downX === upX && downY === upY) {
+                        continue innerDownLoop;
+                    }
+                    break innerDownLoop;
+                }
+
+                const dNorth = isWallOrDivider(FUN_02092934(context, downX, downY - 1));
+                const dSouth = isWallOrDivider(FUN_02092934(context, downX, downY + 1));
+                const dWest  = isWallOrDivider(FUN_02092934(context, downX - 1, downY));
+                const dEast  = isWallOrDivider(FUN_02092934(context, downX + 1, downY));
+
+                if (dNorth && dSouth && dWest && dEast) {
+                    failCount++;
+                    continue outerLoop; // Start over completely from UP stairs
+                }
+
+                // Reject inside corners.
+                if ((dNorth && dEast) || (dNorth && dWest) || (dSouth && dEast) || (dSouth && dWest)) {
+                    failCount++;
+                    continue outerLoop; // Start over completely from UP stairs
+                }
+
+                FUN_0209291c(mapGrid, downX, downY, TILE_DOWN_STAIRS);
+                rooms[downRoomIndex][18] = downX;
+                rooms[downRoomIndex][19] = downY;
+
+                return;
+            }
+        }
+
+        // --- Treasure Chest Placement (FUN_02092164) ---
+        function FUN_02092164(context, floorNum) {
+            // r0 = Random(1,3)
+            const numChests = FUN_02092614(1, 3);
+
+            const mapStruct = context.field_0;
+            mapStruct.chestCount = numChests;
+
+            // FIX: Recreate the exact register residue carried over from FUN_02090444's border loops
+            let r4 = floorNum;      // Inherits floor number (e.g., 3)
+            let r5 = 0x0213B000;    // Context memory pointer placeholder
+            let r6 = 1;             // Leftover from border loop (TILE_WALL = 1)
+            let r7 = mapHeight - 1; // Leftover from the final vertical border loop index
+
+            let r8 = 0; // fail count
+            let r9 = 0; // placed chest count
+
+            while (r9 < numChests) {
+                // ------------------------------------------------------------
+                // Pick random room
+                // ------------------------------------------------------------
+                const roomIndex = FUN_02092614(0, context.field_10 - 1);
+                const room = context.field_1D4[roomIndex];
+
+                const minX = room[0];
+                const minY = room[1];
+                const maxX = room[2];
+                const maxY = room[3];
+
+                const chestX = FUN_02092614(minX, maxX);
+                const chestY = FUN_02092614(minY, maxY);
+
+                let tile = FUN_02092934(context, chestX, chestY);
+
+                // ------------------------------------------------------------
+                // Uninitialized variable logic trap
+                // ------------------------------------------------------------
+                if (r8 < 100) {
+                    // Cast variables to ensure no strict-equality string bugs
+                    r4 = (r4 == 1 || r4 == 3) ? 1 : 0;
+                    r5 = (r5 == 1 || r5 == 3) ? 1 : 0;
+                    r6 = (r6 == 1 || r6 == 3) ? 1 : 0;
+                    r7 = (r7 == 1 || r7 == 3) ? 1 : 0;
+
+                    let branchToFail = false;
+
+                    // Mimics: cmp r4,0; cmpne r5,0; cmpne r6,0; cmpne r7,0; bne LAB_02092194
+                    if (r4 !== 0 && r5 !== 0 && r6 !== 0 && r7 !== 0) {
+                        branchToFail = true;
+                    }
+                    // Mimics: cmp r4,0; cmpne r7,0; bne LAB_02092294
+                    else if (r4 !== 0 && r7 !== 0) {
+                        branchToFail = true;
+                    }
+                    // Mimics: cmp r4,0; cmpne r6,0; bne LAB_02092294
+                    else if (r4 !== 0 && r6 !== 0) {
+                        branchToFail = true;
+                    }
+                    // Mimics: cmp r5,0; cmpne r7,0; bne LAB_02092294
+                    else if (r5 !== 0 && r7 !== 0) {
+                        branchToFail = true;
+                    }
+                    // Mimics: cmp r5,0; cmpne r6,0; beq LAB_0209229c (Skip) -> Fallthrough to LAB_02092294
+                    else if (r5 !== 0 && r6 !== 0) {
+                        branchToFail = true;
+                    }
+
+                    if (branchToFail) {
+                        r8++;
+                        continue;
+                    }
+                }
+
+                // ------------------------------------------------------------
+                // Tile validation
+                // ------------------------------------------------------------
+                if (tile === 6) {
+                    // BUG FIX: Assembly does NOT increment the fail count for chests.
+                    // 0209229c 06 00 50 e3     cmp r0,#0x6
+                    // 020922a0 bb ff ff 0a     beq LAB_02092194
+                    continue;
+                }
+
+                tile -= 4;
+
+                if (tile >= 0 && tile <= 1) { // Tile 4 or 5 (Stairs)
+                    // Assembly DOES increment the fail count for stairs.
+                    // 020922ac 01 80 88 92     addls r8,r8,#0x1
+                    r8++;
+                    continue;
+                }
+
+                // ------------------------------------------------------------
+                // Place chest
+                // ------------------------------------------------------------
+                FUN_0209291c(mapGrid, chestX, chestY, TILE_CHEST);
+
+                const index = r9 & 0xFF;
+                if (!mapStruct._chestCoords) {
+                    mapStruct._chestCoords = [];
+                }
+
+                mapStruct._chestCoords[index] = {
+                    x: chestX,
+                    y: chestY
+                };
+
+                r9++;
+            }
+
+            return 1;
+        }
+
+        // --- Main Floor Generation ---
+        function FUN_02090444(mapSeed, floor) {
+            let hexSeed = mapSeed.toString(16).toUpperCase().padStart(4, "0");
+            let base_seed = (mapSeed + floor) >>> 0;
+            lcg_seed = base_seed;
+            lcg_call_count = 0;
+
+            mapWidth = getFloorSize(mapSeed, floor);
+            mapHeight = getFloorSize(mapSeed, floor);
+            mapContext = new Context(hexSeed, floor, mapWidth, mapHeight);
+
+            mapGrid = Array.from({ length: mapHeight }, () => new Array(mapWidth).fill(TILE_WALL));
+
+            // Divide Area
+            FUN_0209060c(mapContext, mapContext.field_14[0]);
+
+            // Rooms/Nodes
+            for (let i = 0; i < mapContext.field_14.length; i++) {
+                let area = mapContext.field_14[i];
+                if (FUN_0209096c(mapContext, area) === 1) mapContext.field_10++;
+            }
+
+            // Room Transformation
+            for (const area of mapContext.field_14) {
+                if (area.roomIndex !== undefined) FUN_02090b8c(mapContext, mapContext.field_1D4[area.roomIndex], area);
+            }
+
+            // Corridors
+            for (let i = 0; i < mapContext.field_D4.length; i++) {
+                FUN_02091448(mapContext, mapContext.field_D4[i]);
+            }
+
+            // Borders
+            for (let x = 0; x < mapWidth; x++) {
+                FUN_0209291c(mapGrid, x, 0, TILE_WALL);
+                FUN_0209291c(mapGrid, x, mapHeight - 1, TILE_WALL);
+            }
+            for (let y = 0; y < mapHeight; y++) {
+                FUN_0209291c(mapGrid, 0, y, TILE_WALL);
+                FUN_0209291c(mapGrid, mapWidth - 1, y, TILE_WALL);
+            }
+
+            // Stairs
+            FUN_02091bc0(mapContext);
+
+            // Check floor limit (cmp r4,#0x2)
+            if (floor <= 2) {
+                mapContext.field_0.chestCount = 0;
+            } else {
+                // Chests
+                FUN_02092164(mapContext, floor);
+            }
+
+            // Generate Bitfield Grid
+            bitfieldGrid = Array.from({ length: mapHeight }, () => new Array(mapWidth).fill(0));
+            for (let y = 0; y < mapHeight; y++) {
+                for (let x = 0; x < mapWidth; x++) {
+                    bitfieldGrid[y][x] = FUN_0209277c(mapContext, x, y);
+                }
+            }
+        }
+
+        // ============================================================
+        // SECTION 2: SPRITE / SPAWN-NODE GRID
+        // (adapted from the sprite grid script — the dump textarea is
+        //  gone, tokens now come straight from bitfieldGrid above)
+        // ============================================================
+
+        class LCG {
+            constructor(seed) {
+                this.seed = seed >>> 0;
+            }
+            next() {
+                // seed = seed * 1103515245 + 12345
+                this.seed = (Math.imul(this.seed, 1103515245) + 12345) >>> 0;
+                // return (seed >> 16) & 0x7fff
+                return (this.seed >>> 16) & 0x7fff;
+            }
+        }
+
+        const tileMap = {
+            'FF':'00', 'BB':'01', 'EE':'02', 'EB':'05', 'AF':'06', 'BE':'07', 'FA':'08', 'AA':'09',
+            'EA':'0D', 'AB':'0E', 'AE':'0F', 'BA':'10', 'FB':'11', 'EF':'12', 'BF':'13', 'FE':'14',
+            'E0':'15', '83':'16', '0E':'17', '38':'18', 'E3':'19', '8F':'1A', '3E':'1B', 'F8':'1C',
+            '80':'1D', '02':'1E', '08':'1F', '20':'20', '00':'21', 'A0':'22', '82':'23', '0A':'24',
+            '28':'25', 'A3':'26', '8E':'27', '3A':'28', 'E8':'29', 'B8':'2A', 'E2':'2B', '8B':'2C',
+            '2E':'2D', 'A2':'2E', '8A':'2F', '2A':'30', 'A8':'31', '22':'32', '88':'33'
+        };
+
+        const envIndices = { caves: 0, ruins: 1, ice: 2, water: 3, fire: 4 };
+        const SPRITESHEET = "mapSprites.png";
+
+        // Layout tables formatted as 45 character hex strings (9 chars per environment: C, R, I, W, F)
+        // Mod table follows the order: [Caves, Ruins, Ice, Water, Fire]
+        const tileData = {
+            'FF': { mod: [0,0,0,0,0], layout: "000000000000000000000000000000000000000000000"},
+            'BB': { mod: [3,3,3,3,3], layout: "050050050050050050050050050050050050050050050"},
+            'EE': { mod: [3,3,3,3,3], layout: "000555000000555000000555000000555000000555000"},
+            'EB': { mod: [1,1,1,1,1], layout: "000060000000060000000060000000060000000060000"},
+            'AF': { mod: [1,1,1,1,1], layout: "000060000000060000000060000000060000000060000"},
+            'BE': { mod: [1,1,1,1,1], layout: "000060000000060000000060000000060000000060000"},
+            'FA': { mod: [1,1,1,1,1], layout: "000060000000060000000060000000060000000060000"},
+            'AA': { mod: [1,1,1,1,1], layout: "0000F00000000F00000000F00000000F00000000F0000"},
+            'EA': { mod: [1,1,1,1,1], layout: "0000A00000000E00000000E00000000E00000000E0000"},
+            'AB': { mod: [1,1,1,1,1], layout: "0000A00000000E00000000E00000000E00000000E0000"},
+            'AE': { mod: [1,1,1,1,1], layout: "0000A00000000E00000000E00000000E00000000E0000"},
+            'BA': { mod: [1,1,1,1,1], layout: "0000A00000000E00000000E00000000E00000000E0000"},
+            'FB': { mod: [2,2,1,2,2], layout: "000040050000040050000000040000040040000040040"},
+            'EF': { mod: [2,2,1,2,2], layout: "000045000000045000000004000000044000000044000"},
+            'BF': { mod: [2,2,1,2,2], layout: "050040000050040000040000000040040000040040000"},
+            'FE': { mod: [2,2,1,2,2], layout: "000540000000540000000400000000440000000440000"},
+            'E0': { mod: [2,3,3,3,3], layout: "000000E0E000000EEE000000EEE000000EEE000000EEE"},
+            '83': { mod: [2,3,3,3,3], layout: "00E00000E00E00E00E00E00E00E00E00E00E00E00E00E"},
+            '0E': { mod: [2,3,3,3,3], layout: "E0E000000EEE000000EEE000000EEE000000EEE000000"},
+            '38': { mod: [2,3,3,3,3], layout: "E00000E00E00E00E00E00E00E00E00E00E00E00E00E00"},
+            'E3': { mod: [1,1,1,1,1], layout: "00000000F000000006000000006000000006000000006"},
+            '8F': { mod: [1,1,1,1,1], layout: "00F000000006000000006000000006000000006000000"},
+            '3E': { mod: [1,1,1,1,1], layout: "F00000000600000000600000000600000000600000000"},
+            'F8': { mod: [1,1,1,1,1], layout: "000000F00000000600000000600000000600000000600"},
+            '80': { mod: [1,1,1,1,1], layout: "00000000F00000000F00000000F00000000F00000000F"},
+            '02': { mod: [1,1,1,1,1], layout: "00F00000000F00000000F00000000F00000000F000000"},
+            '08': { mod: [1,1,1,1,1], layout: "F00000000F00000000F00000000F00000000F00000000"},
+            '20': { mod: [1,1,1,1,1], layout: "000000F00000000F00000000F00000000F00000000F00"},
+            '00': { mod: [8,9,7,9,8], layout: "D07FEFFFFFFFFFFFFF07FED0FFEFFFFFFFFFFFBBFE07F"},
+            'A0': { mod: [1,1,1,1,1], layout: "0000000F00000000F00000000D00000000F00000000F0"},
+            '82': { mod: [1,1,1,1,1], layout: "00000F00000000F00000000D00000000F00000000F000"},
+            '0A': { mod: [1,1,1,1,1], layout: "0F00000000F00000000D00000000F00000000F0000000"},
+            '28': { mod: [1,1,1,1,1], layout: "000F00000000F00000000D00000000F00000000F00000"},
+            'A3': { mod: [1,1,1,1,1], layout: "000070000000050000000070000000070000000070000"},
+            '8E': { mod: [1,1,1,1,1], layout: "000070000000050000000070000000070000000070000"},
+            '3A': { mod: [1,1,1,1,1], layout: "000070000000050000000070000000070000000070000"},
+            'E8': { mod: [1,1,1,1,1], layout: "000070000000050000000070000000070000000070000"},
+            'B8': { mod: [1,1,1,1,1], layout: "0000D00000000500000000D00000000D00000000D0000"},
+            'E2': { mod: [1,1,1,1,1], layout: "0000D00000000500000000D00000000D00000000D0000"},
+            '8B': { mod: [1,1,1,1,1], layout: "0000D00000000500000000D00000000D00000000D0000"},
+            '2E': { mod: [1,1,1,1,1], layout: "0000D00000000500000000D00000000D00000000D0000"},
+            'A2': { mod: [1,1,1,1,1], layout: "0000F00000000900000000F00000000F00000000F0000"},
+            '8A': { mod: [1,1,1,1,1], layout: "0000F00000000900000000F00000000F00000000F0000"},
+            '2A': { mod: [1,1,1,1,1], layout: "0000F00000000900000000F00000000F00000000F0000"},
+            'A8': { mod: [1,1,1,1,1], layout: "0000F00000000900000000F00000000F00000000F0000"},
+            '22': { mod: [1,1,1,1,1], layout: "0000F00000000F00000000F00000000F00000000F0000"},
+            '88': { mod: [1,1,1,1,1], layout: "0000F00000000F00000000F00000000F00000000F0000"}
+        };
+
+        const modifiers = [
+            { x: -10922, z: -10922 }, // 0
+            { x: 0,      z: -10922 }, // 1
+            { x: 10922,  z: -10922 }, // 2
+            { x: -10922, z: 0 },      // 3
+            { x: 0,      z: 0 },      // 4
+            { x: 10922,  z: 0 },      // 5
+            { x: -10922, z: 10922 },  // 6
+            { x: 0,      z: 10922 },  // 7
+            { x: 10922,  z: 10922 }   // 8
+        ];
+
+        const exceptions = {
+            0: { x: -13516, z: -13516 },
+            2: { x: 13516,  z: -13516 },
+            6: { x: -13516, z: 13516 },
+            8: { x: 13516,  z: 13516 }
+        };
+
+        function getEnvironment(seedHex) {
+            const seed = parseInt(seedHex, 16) || 0;
+            const lcg = new LCG(seed);
+            let val;
+            for (let i = 0; i < 13; i++) val = lcg.next();
+            val = val % 100;
+
+            if (val < 30) return 'caves';
+            if (val < 70) return 'ruins';
+            if (val < 80) return 'ice';
+            if (val < 90) return 'water';
+            return 'fire';
+        }
+
+        function calculateCoords(tokens, envString, currentFloor) {
+            const lcg = new LCG(parseInt(currentFloor, 10) || 1);
+            const coords = [];
+            const envInt = envIndices[envString];
+
+            for (let i = 0; i < 256; i++) {
+                const tileId = tokens[i] || 'FF';
+
+                if (tileId !== 'FF' && tileData[tileId]) {
+                    const r1 = lcg.next();
+                    lcg.next(); // r2 is advanced but not used per instructions
+
+                    const modVal = tileData[tileId].mod[envInt];
+                    const layoutStr = tileData[tileId].layout.substr(envInt * 9, 9);
+
+                    const nonZeroIndices = [];
+                    for (let j = 0; j < 9; j++) {
+                        if (layoutStr[j] !== '0') nonZeroIndices.push(j);
+                    }
+
+                    if (nonZeroIndices.length > 0) {
+                        const chosenIndex = nonZeroIndices[r1 % modVal]; // Orientation 0-8
+
+                        const xNibble = i & 0x0F;
+                        const zNibble = (i & 0xF0) >> 4;
+
+                        const baseX = (xNibble * 8 + 4) * 0x1000;
+                        const baseZ = (zNibble * 8 + 4) * 0x1000;
+
+                        let modX = 0, modZ = 0;
+
+                        if (['E3', '8F', '3E', 'F8'].includes(tileId)) {
+                            modX = exceptions[chosenIndex].x;
+                            modZ = exceptions[chosenIndex].z;
+                        } else {
+                            modX = modifiers[chosenIndex].x;
+                            modZ = modifiers[chosenIndex].z;
+                        }
+
+                        const finalX = (baseX + modX) >> 12;
+                        const finalZ = (baseZ + modZ) >> 12;
+
+                        coords.push({ x: finalX, z: finalZ });
+                    }
+                }
+            }
+            return coords;
+        }
+
+        function drawOverlapCanvas(markers) {
+            const canvas = document.getElementById("overlapCanvas");
+            const ctx = canvas.getContext("2d");
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const width = canvas.width;
+            const height = canvas.height;
+
+            const countCanvas = document.createElement("canvas");
+            countCanvas.width = width;
+            countCanvas.height = height;
+            const countCtx = countCanvas.getContext("2d");
+            const image = countCtx.createImageData(width, height);
+            const counts = new Uint8Array(width * height);
+
+            markers.forEach(m => {
+                const minX = Math.max(0, Math.floor(m.px - m.r));
+                const maxX = Math.min(width - 1, Math.ceil(m.px + m.r));
+                const minY = Math.max(0, Math.floor(m.py - m.r));
+                const maxY = Math.min(height - 1, Math.ceil(m.py + m.r));
+
+                for (let y = minY; y <= maxY; y++) {
+                    for (let x = minX; x <= maxX; x++) {
+                        const dx = x - m.px;
+                        const dy = y - m.py;
+                        if (dx * dx + dy * dy <= m.r * m.r) {
+                            counts[y * width + x]++;
+                        }
+                    }
+                }
+            });
+
+            const pixels = image.data;
+            for (let i = 0; i < counts.length; i++) {
+                if (counts[i] >= 2) {
+                    pixels[i * 4 + 0] = 0;     // red
+                    pixels[i * 4 + 1] = 255;   // green
+                    pixels[i * 4 + 2] = 0;     // blue
+                    pixels[i * 4 + 3] = 127;   // alpha
+                }
+            }
+
+            countCtx.putImageData(image, 0, 0);
+            ctx.drawImage(countCanvas, 0, 0);
+        }
+
+        function drawCoordinateOverlay(coords) {
+            const overlay = document.getElementById("overlay");
+            overlay.innerHTML = "";
+            const markers = [];
+            const PIXELS_PER_UNIT = 8;
+
+            coords.forEach(c => {
+                const px = c.x * PIXELS_PER_UNIT;
+                const py = c.z * PIXELS_PER_UNIT;
+
+                const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+                const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+
+                circle.setAttribute("cx", px);
+                circle.setAttribute("cy", py);
+                circle.setAttribute("r", 3.5 * PIXELS_PER_UNIT);
+                circle.setAttribute("fill", "rgba(64,64,64,.18)");
+                circle.setAttribute("stroke", "#404040");
+                circle.setAttribute("stroke-width", "2");
+
+                const h = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                h.setAttribute("x1", px - 4); h.setAttribute("y1", py);
+                h.setAttribute("x2", px + 4); h.setAttribute("y2", py);
+                h.setAttribute("stroke", "#404040");
+                h.setAttribute("stroke-width", "2");
+
+                const v = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                v.setAttribute("x1", px); v.setAttribute("y1", py - 4);
+                v.setAttribute("x2", px); v.setAttribute("y2", py + 4);
+                v.setAttribute("stroke", "#404040");
+                v.setAttribute("stroke-width", "2");
+
+                group.appendChild(circle);
+                group.appendChild(h);
+                group.appendChild(v);
+
+                markers.push({ px, py, r: 3.5 * PIXELS_PER_UNIT, circle, h, v });
+                overlay.appendChild(group);
+            });
+
+            overlay.onmousemove = (e) => {
+                const pt = overlay.createSVGPoint();
+                pt.x = e.clientX;
+                pt.y = e.clientY;
+                const p = pt.matrixTransform(overlay.getScreenCTM().inverse());
+
+                markers.forEach(m => {
+                    const dx = p.x - m.px;
+                    const dy = p.y - m.py;
+                    if (dx * dx + dy * dy <= m.r * m.r) {
+                        m.circle.setAttribute("stroke", "#00cf00");
+                        m.h.setAttribute("stroke", "#00cf00");
+                        m.v.setAttribute("stroke", "#00cf00");
+                    } else {
+                        m.circle.setAttribute("stroke", "#404040");
+                        m.h.setAttribute("stroke", "#404040");
+                        m.v.setAttribute("stroke", "#404040");
+                    }
+                });
+            };
+
+            overlay.onmouseleave = () => {
+                markers.forEach(m => {
+                    m.circle.setAttribute("stroke", "#404040");
+                    m.h.setAttribute("stroke", "#404040");
+                    m.v.setAttribute("stroke", "#404040");
+                });
+            };
+            drawOverlapCanvas(markers);
+        }
+
+        // Builds the 256-entry (16x16) bitfield token dump directly from
+        // the bitfieldGrid produced by FUN_02090444, instead of reading it
+        // from a pasted-in dump. The generated floor (mapWidth x mapHeight,
+        // which can be smaller than 16x16) is placed at the top-left of a
+        // fixed 16x16 token grid; every cell outside the generated area is
+        // left as 'FF' (no tile), matching the format the sprite grid
+        // expects.
+        function buildBitfieldTokens() {
+            const tokens = new Array(256).fill('FF');
+            for (let y = 0; y < mapHeight && y < 16; y++) {
+                for (let x = 0; x < mapWidth && x < 16; x++) {
+                    tokens[y * 16 + x] = bitfieldGrid[y][x].toString(16).toUpperCase().padStart(2, '0');
+                }
+            }
+            return tokens;
+        }
+
+        function renderSpriteGrid(seedHex, floor, tokens) {
+            const envString = getEnvironment(seedHex);
+
+            const gridContainer = document.getElementById('spriteGrid');
+            gridContainer.innerHTML = '';
+
+            const TILE_SIZE = 32;
+
+            for (let i = 0; i < 256; i++) {
+                const bitfield = tokens[i] || 'FF';
+                const spriteId = tileMap[bitfield];
+                const cell = document.createElement('div');
+                cell.className = 'sprite-cell';
+
+                if (spriteId) {
+                    const decIndex = parseInt(spriteId, 16);
+                    const xOffset = envIndices[envString] * TILE_SIZE;
+                    const yOffset = decIndex * TILE_SIZE;
+
+                    cell.style.backgroundImage = `url('${SPRITESHEET}')`;
+                    cell.style.backgroundSize = `${TILE_SIZE * 2 * 5}px auto`;
+                    cell.style.backgroundPosition = `-${xOffset * 2}px -${yOffset * 2}px`;
+                } else {
+                    cell.classList.add('unknown');
+                    cell.innerText = '??';
+                }
+                gridContainer.appendChild(cell);
+            }
+
+            const coords = calculateCoords(tokens, envString, floor);
+            drawCoordinateOverlay(coords);
+        }
+
+        // ============================================================
+        // SECTION 3: WIRING
+        // ============================================================
+
+        function run() {
+            const seedInput = document.getElementById('mapSeed').value;
+            const seedStr = seedInput.replace(/^0x/i, "");
+            const mapSeed = parseInt(seedStr, 16);
+            const floor = parseInt(document.getElementById('floor').value, 10);
+
+            if (isNaN(mapSeed) || isNaN(floor)) {
+                return;
+            }
+
+            FUN_02090444(mapSeed, floor);
+
+            const tokens = buildBitfieldTokens();
+            renderSpriteGrid(seedStr, floor, tokens);
+        }
+
+        document.getElementById('mapSeed').addEventListener('input', run);
+        document.getElementById('floor').addEventListener('input', run);
+
+        run();
+    </script>
+</body>
+</html>
