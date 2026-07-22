@@ -68,8 +68,6 @@
             position: relative;
             width: 1024px;
             height: 1024px;
-
-            /* Scale uniformly */
             transform-origin: top center;
         }
         .grid-scale-wrapper {
@@ -153,21 +151,13 @@
     </div>
 
     <script>
-        // ============================================================
-        // SECTION 1: FLOOR / BITFIELD GENERATION
-        // (adapted from the floor generation script — map + bitfield
-        //  canvases removed, everything else preserved as-is)
-        // ============================================================
-
-        // --- LCG Random Number Generator & Debug Counters ---
         let lcg_seed = 0;
-        let lcg_call_count = 0;
+        let lcg_call_count = 0; // Debug Counter
 
         function set_seed(val) {
             lcg_seed = val >>> 0;
         }
 
-        // --- Floor Size Logic ---
         function getFloorSize(mapSeed, floor) {
             let val = (mapSeed + floor) >>> 0;
             if (floor <= 4) return (val % 5) + 10;
@@ -176,7 +166,6 @@
             return 16;
         }
 
-        // --- Map Constants & Structures ---
         const TILE_ROOM = 0;
         const TILE_WALL = 1;
         const TILE_CORRIDOR = 2;
@@ -191,9 +180,6 @@
         let mapGrid = [];
         let bitfieldGrid = [];
         let mapContext = null;
-        let rngContext = "";
-        let writes = 0;
-        let global_seed = 0
 
         class Context {
             constructor(m, f, w, h) {
@@ -223,19 +209,18 @@
             }
         }
 
-        // --- Core Helpers ---
-
         function s8(v) {
             return (v << 24) >> 24;
         }
 
+        // Set tile value
         function FUN_0209291c(grid, x, y, val) {
-            writes = writes + 1;
             if (x >= 0 && y >= 0 && y < grid.length && x < grid[y].length) {
                 grid[y][x] = val & 0xFF;
             }
         }
 
+        // Get tile value
         function FUN_02092934(context, x, y) {
             if (x < 0 || y < 0 || y >= mapHeight || x >= mapWidth) {
                 return -1;
@@ -243,18 +228,16 @@
             return mapGrid[y][x];
         }
 
+        // Get Num from Range
         function FUN_02092614(min, max) {
             if (min === max) return min;
-
             let rand_val = FUN_02003d14();
-            global_seed = rand_val
             let range = max - min + 1;
-
             if (range <= 0) return min;
-
             return min + (rand_val % range);
         }
 
+        // AT LCG
         function FUN_02003d14() {
             lcg_call_count++;
             let mult = 0x41C64E6D;
@@ -267,7 +250,101 @@
         function FUN_02090860(r0) { return r0[3] - r0[1] + 1; }
         function FUN_02090860_Width(structPtr) { return structPtr[2] - structPtr[0] + 1; }
 
-        // --- Node / Door Placement (FUN_020922fc) ---
+        // Divide Area
+        function FUN_0209076c(context, areaPtr) {
+            let x1 = areaPtr[0], x2 = areaPtr[2];
+            let width = x2 - x1 + 1;
+
+            if (width < 7) return 0;
+            if (areaPtr[5] !== 0) return 0;
+
+            let max_val = width - 6;
+            let offset = FUN_02092614(0, max_val - 1);
+            let split_x = x1 + 3 + offset;
+            let y1 = areaPtr[1], y2 = areaPtr[3];
+
+            for (let y = y1; y <= y2; y++) FUN_0209291c(mapGrid, split_x, y, TILE_DIVIDER);
+
+            let newArea = new Int8Array(12);
+            newArea[0] = split_x + 1; newArea[1] = y1;
+            newArea[2] = x2; newArea[3] = y2;
+            newArea[4] = 0; newArea[5] = 0;
+            context.field_14.push(newArea);
+
+            areaPtr[2] = split_x - 1;
+            areaPtr[5] = 1;
+
+            context.field_D4.push({ split_x: split_x, split_y: 0, area1: areaPtr, area2: newArea, split_dir: 2 });
+            return 1;
+        }
+
+        // Divide Area
+        function FUN_02090874(context, areaPtr) {
+            let y1 = areaPtr[1], y2 = areaPtr[3];
+            let height = y2 - y1 + 1;
+
+            if (height < 7) return 0;
+            if (areaPtr[4] !== 0) return 0;
+
+            let max_val = height - 6;
+            let offset = FUN_02092614(0, max_val - 1);
+            let split_y = y1 + 3 + offset;
+            let x1 = areaPtr[0], x2 = areaPtr[2];
+
+            for (let x = x1; x <= x2; x++) FUN_0209291c(mapGrid, x, split_y, TILE_DIVIDER);
+
+            let newArea = new Int8Array(12);
+            newArea[0] = x1; newArea[1] = split_y + 1;
+            newArea[2] = x2; newArea[3] = y2;
+            newArea[4] = 0; newArea[5] = 0;
+            context.field_14.push(newArea);
+
+            areaPtr[3] = split_y - 1;
+            areaPtr[4] = 1;
+
+            context.field_D4.push({ split_x: 0, split_y: split_y, area1: areaPtr, area2: newArea, split_dir: 1 });
+            return 1;
+        }
+
+        // Divide Area
+        function FUN_0209060c(context, areaPtr) {
+            if (context.field_8 >= 15) return;
+
+            if (areaPtr[5] !== 0) {
+                if (FUN_02090874(context, areaPtr) === 0) return;
+                goto_split_success(context, areaPtr); return;
+            }
+            if (areaPtr[4] !== 0) {
+                if (FUN_0209076c(context, areaPtr) === 0) return;
+                goto_split_success(context, areaPtr); return;
+            }
+
+            let rand_val = FUN_02003d14();
+            let r1 = (rand_val >> 31) & 1;
+            let bit = (r1 + ((rand_val ^ r1) & 1)) & 1;
+
+            let res = (bit === 0) ? FUN_02090874(context, areaPtr) : FUN_0209076c(context, areaPtr);
+            if (res === 0) return;
+
+            goto_split_success(context, areaPtr);
+        }
+
+        // Divide Area
+        function goto_split_success(context, oldAreaPtr) {
+            context.field_8++;
+            context.field_C++;
+
+            let newAreaPtr = context.field_14[context.field_14.length - 1];
+            let rand_bit = FUN_02003d14() & 1;
+
+            if (rand_bit !== 0) {
+                FUN_0209060c(context, oldAreaPtr); FUN_0209060c(context, newAreaPtr);
+            } else {
+                FUN_0209060c(context, newAreaPtr); FUN_0209060c(context, oldAreaPtr);
+            }
+        }
+
+        // Generate Nodes
         function FUN_020922fc(context, room) {
             let x1 = room[0]; let y1 = room[1];
             let x2 = room[2]; let y2 = room[3];
@@ -331,7 +408,64 @@
             }
         }
 
-        // --- Room Transformation (FUN_02090b8c) ---
+         // Generate Rooms
+        function FUN_0209096c(context, areaPtr) {
+            let area_x1 = areaPtr[0]; let area_y1 = areaPtr[1];
+            let area_x2 = areaPtr[2]; let area_y2 = areaPtr[3];
+
+            let width = area_x2 - area_x1 + 1;
+            if (width < 3) return 0;
+            let height = area_y2 - area_y1 + 1;
+            if (height < 3) return 0;
+
+            let rand1 = FUN_02092614(0, 1);
+            let new_x1, new_y1;
+            if (rand1 !== 0) {
+                let third_w = Math.floor(width / 3);
+                new_x1 = FUN_02092614(area_x1, area_x1 + third_w);
+                let third_h = Math.floor(height / 3);
+                new_y1 = FUN_02092614(area_y1, area_y1 + third_h);
+            } else {
+                let third_w = Math.floor(width / 3);
+                new_x1 = FUN_02092614(area_x1 + 1, area_x1 + third_w);
+                let third_h = Math.floor(height / 3);
+                new_y1 = FUN_02092614(area_y1 + 1, area_y1 + third_h);
+            }
+
+            let rand2 = FUN_02092614(0, 1);
+            let new_x2, new_y2;
+            if (rand2 !== 0) {
+                let third_w = Math.floor(width / 3);
+                new_x2 = FUN_02092614(area_x1 + (third_w * 2), area_x2);
+                let third_h = Math.floor(height / 3);
+                new_y2 = FUN_02092614(area_y1 + (third_h * 2), area_y2);
+            } else {
+                let third_w = Math.floor(width / 3);
+                new_x2 = FUN_02092614(area_x1 + (third_w * 2), area_x2 - 1);
+                let third_h = Math.floor(height / 3);
+                new_y2 = FUN_02092614(area_y1 + (third_h * 2), area_y2 - 1);
+            }
+
+            let newRoom = new Int8Array(20);
+            newRoom[0] = new_x1; newRoom[1] = new_y1;
+            newRoom[2] = new_x2; newRoom[3] = new_y2;
+
+            const roomIndex = context.field_1D4.length;
+            context.field_1D4.push(newRoom);
+            areaPtr.roomIndex = roomIndex;
+
+            for (let y = new_y1; y <= new_y2; y++) {
+                for (let x = new_x1; x <= new_x2; x++) {
+                    FUN_0209291c(mapGrid, x, y, TILE_ROOM);
+                }
+            }
+
+            // Generate Nodes in Generate Rooms
+            FUN_020922fc(context, newRoom);
+            return 1;
+        }
+
+        // Transform Rooms
         function FUN_02090b8c(context, room, area) {
             let outer = area; let inner = room;
             let x1 = inner[0]; let y1 = inner[1];
@@ -492,155 +626,7 @@
             }
         }
 
-         // Rooms
-        function FUN_0209096c(context, areaPtr) {
-            let area_x1 = areaPtr[0]; let area_y1 = areaPtr[1];
-            let area_x2 = areaPtr[2]; let area_y2 = areaPtr[3];
-
-            let width = area_x2 - area_x1 + 1;
-            if (width < 3) return 0;
-            let height = area_y2 - area_y1 + 1;
-            if (height < 3) return 0;
-
-            let rand1 = FUN_02092614(0, 1);
-            let new_x1, new_y1;
-            if (rand1 !== 0) {
-                let third_w = Math.floor(width / 3);
-                new_x1 = FUN_02092614(area_x1, area_x1 + third_w);
-                let third_h = Math.floor(height / 3);
-                new_y1 = FUN_02092614(area_y1, area_y1 + third_h);
-            } else {
-                let third_w = Math.floor(width / 3);
-                new_x1 = FUN_02092614(area_x1 + 1, area_x1 + third_w);
-                let third_h = Math.floor(height / 3);
-                new_y1 = FUN_02092614(area_y1 + 1, area_y1 + third_h);
-            }
-
-            let rand2 = FUN_02092614(0, 1);
-            let new_x2, new_y2;
-            if (rand2 !== 0) {
-                let third_w = Math.floor(width / 3);
-                new_x2 = FUN_02092614(area_x1 + (third_w * 2), area_x2);
-                let third_h = Math.floor(height / 3);
-                new_y2 = FUN_02092614(area_y1 + (third_h * 2), area_y2);
-            } else {
-                let third_w = Math.floor(width / 3);
-                new_x2 = FUN_02092614(area_x1 + (third_w * 2), area_x2 - 1);
-                let third_h = Math.floor(height / 3);
-                new_y2 = FUN_02092614(area_y1 + (third_h * 2), area_y2 - 1);
-            }
-
-            let newRoom = new Int8Array(20);
-            newRoom[0] = new_x1; newRoom[1] = new_y1;
-            newRoom[2] = new_x2; newRoom[3] = new_y2;
-
-            const roomIndex = context.field_1D4.length;
-            context.field_1D4.push(newRoom);
-            areaPtr.roomIndex = roomIndex;
-
-            for (let y = new_y1; y <= new_y2; y++) {
-                for (let x = new_x1; x <= new_x2; x++) {
-                    FUN_0209291c(mapGrid, x, y, TILE_ROOM);
-                }
-            }
-
-            FUN_020922fc(context, newRoom);
-            return 1;
-        }
-
-        // --- Split Functions ---
-        function FUN_0209076c(context, areaPtr) {
-            let x1 = areaPtr[0], x2 = areaPtr[2];
-            let width = x2 - x1 + 1;
-
-            if (width < 7) return 0;
-            if (areaPtr[5] !== 0) return 0;
-
-            let max_val = width - 6;
-            let offset = FUN_02092614(0, max_val - 1);
-            let split_x = x1 + 3 + offset;
-            let y1 = areaPtr[1], y2 = areaPtr[3];
-
-            for (let y = y1; y <= y2; y++) FUN_0209291c(mapGrid, split_x, y, TILE_DIVIDER);
-
-            let newArea = new Int8Array(12);
-            newArea[0] = split_x + 1; newArea[1] = y1;
-            newArea[2] = x2; newArea[3] = y2;
-            newArea[4] = 0; newArea[5] = 0;
-            context.field_14.push(newArea);
-
-            areaPtr[2] = split_x - 1;
-            areaPtr[5] = 1;
-
-            context.field_D4.push({ split_x: split_x, split_y: 0, area1: areaPtr, area2: newArea, split_dir: 2 });
-            return 1;
-        }
-
-        function FUN_02090874(context, areaPtr) {
-            let y1 = areaPtr[1], y2 = areaPtr[3];
-            let height = y2 - y1 + 1;
-
-            if (height < 7) return 0;
-            if (areaPtr[4] !== 0) return 0;
-
-            let max_val = height - 6;
-            let offset = FUN_02092614(0, max_val - 1);
-            let split_y = y1 + 3 + offset;
-            let x1 = areaPtr[0], x2 = areaPtr[2];
-
-            for (let x = x1; x <= x2; x++) FUN_0209291c(mapGrid, x, split_y, TILE_DIVIDER);
-
-            let newArea = new Int8Array(12);
-            newArea[0] = x1; newArea[1] = split_y + 1;
-            newArea[2] = x2; newArea[3] = y2;
-            newArea[4] = 0; newArea[5] = 0;
-            context.field_14.push(newArea);
-
-            areaPtr[3] = split_y - 1;
-            areaPtr[4] = 1;
-
-            context.field_D4.push({ split_x: 0, split_y: split_y, area1: areaPtr, area2: newArea, split_dir: 1 });
-            return 1;
-        }
-
-        function FUN_0209060c(context, areaPtr) {
-            if (context.field_8 >= 15) return;
-
-            if (areaPtr[5] !== 0) {
-                if (FUN_02090874(context, areaPtr) === 0) return;
-                goto_split_success(context, areaPtr); return;
-            }
-            if (areaPtr[4] !== 0) {
-                if (FUN_0209076c(context, areaPtr) === 0) return;
-                goto_split_success(context, areaPtr); return;
-            }
-
-            let rand_val = FUN_02003d14();
-            let r1 = (rand_val >> 31) & 1;
-            let bit = (r1 + ((rand_val ^ r1) & 1)) & 1;
-
-            let res = (bit === 0) ? FUN_02090874(context, areaPtr) : FUN_0209076c(context, areaPtr);
-            if (res === 0) return;
-
-            goto_split_success(context, areaPtr);
-        }
-
-        function goto_split_success(context, oldAreaPtr) {
-            context.field_8++;
-            context.field_C++;
-
-            let newAreaPtr = context.field_14[context.field_14.length - 1];
-            let rand_bit = FUN_02003d14() & 1;
-
-            if (rand_bit !== 0) {
-                FUN_0209060c(context, oldAreaPtr); FUN_0209060c(context, newAreaPtr);
-            } else {
-                FUN_0209060c(context, newAreaPtr); FUN_0209060c(context, oldAreaPtr);
-            }
-        }
-
-        // --- CORRIDOR GENERATION ---
-
+        // Generate Corridors
         function FUN_0209162c(context, room1, offset1, room2, offset2, splitData, param_5) {
             let r1x = room1[offset1];
             let r1y = room1[offset1 + 1];
@@ -744,6 +730,7 @@
             return 1;
         }
 
+        // Generate Corridors
         function FUN_02091448(context, splitData) {
             let split_dir = splitData.split_dir;
             let room1 = context.field_1D4[splitData.area1.roomIndex];
@@ -778,12 +765,11 @@
             return 1;
         }
 
+        // Convert Tile to Bitfield (8 Neighbour Check)
         function FUN_0209277c(context, x, y) {
             const SOLID = t => (t === TILE_WALL || t === TILE_DIVIDER) ? 1 : 0;
-
             const center = FUN_02092934(context, x, y);
 
-            // reject walls/dividers
             if (center === TILE_WALL || center === TILE_DIVIDER)
                 return 0xFF;
 
@@ -813,6 +799,7 @@
             return mask & 0xFF;
         }
 
+        // Generate Stairs
         function FUN_02091bc0(context) {
             const rooms = context.field_1D4;
             const roomCount = rooms.length;
@@ -835,9 +822,7 @@
             // LAB_02091bd4
             outerLoop:
             while (true) {
-                //----------------------------------------------------------
-                // Pick UP stairs
-                //----------------------------------------------------------
+                // Create UP stairs
                 let upRoomIndex = FUN_02092614(0, roomCount - 1);
                 const room = rooms[upRoomIndex];
 
@@ -855,7 +840,7 @@
                         continue outerLoop;
                     }
 
-                    // Reject inside corners.
+                    // Reject inside corners
                     if ((north && east) || (north && west) || (south && east) || (south && west)) {
                         failCount++;
                         continue outerLoop;
@@ -875,9 +860,7 @@
                 // After placing UP stairs successfully, failCount resets
                 failCount = 0;
 
-                //----------------------------------------------------------
                 // Pick DOWN stairs
-                //----------------------------------------------------------
                 let downRoomIndex, downX, downY;
 
                 // LAB_02091ec8
@@ -913,7 +896,7 @@
                     continue outerLoop; // Start over completely from UP stairs
                 }
 
-                // Reject inside corners.
+                // Reject inside corners
                 if ((dNorth && dEast) || (dNorth && dWest) || (dSouth && dEast) || (dSouth && dWest)) {
                     failCount++;
                     continue outerLoop; // Start over completely from UP stairs
@@ -927,16 +910,14 @@
             }
         }
 
-        // --- Treasure Chest Placement (FUN_02092164) ---
+        // Generate Chests
         function FUN_02092164(context, floorNum) {
-            // r0 = Random(1,3)
             const numChests = FUN_02092614(1, 3);
-
             const mapStruct = context.field_0;
             mapStruct.chestCount = numChests;
 
-            // FIX: Recreate the exact register residue carried over from FUN_02090444's border loops
-            let r4 = floorNum;      // Inherits floor number (e.g., 3)
+            // Recreate registers carried over from FUN_02090444's border loops
+            let r4 = floorNum;      // Inherits floor number
             let r5 = 0x0213B000;    // Context memory pointer placeholder
             let r6 = 1;             // Leftover from border loop (TILE_WALL = 1)
             let r7 = mapHeight - 1; // Leftover from the final vertical border loop index
@@ -945,9 +926,7 @@
             let r9 = 0; // placed chest count
 
             while (r9 < numChests) {
-                // ------------------------------------------------------------
                 // Pick random room
-                // ------------------------------------------------------------
                 const roomIndex = FUN_02092614(0, context.field_10 - 1);
                 const room = context.field_1D4[roomIndex];
 
@@ -961,9 +940,7 @@
 
                 let tile = FUN_02092934(context, chestX, chestY);
 
-                // ------------------------------------------------------------
                 // Uninitialized variable logic trap
-                // ------------------------------------------------------------
                 if (r8 < 100) {
                     // Cast variables to ensure no strict-equality string bugs
                     r4 = (r4 == 1 || r4 == 3) ? 1 : 0;
@@ -973,23 +950,23 @@
 
                     let branchToFail = false;
 
-                    // Mimics: cmp r4,0; cmpne r5,0; cmpne r6,0; cmpne r7,0; bne LAB_02092194
+                    // cmp r4,0; cmpne r5,0; cmpne r6,0; cmpne r7,0; bne LAB_02092194
                     if (r4 !== 0 && r5 !== 0 && r6 !== 0 && r7 !== 0) {
                         branchToFail = true;
                     }
-                    // Mimics: cmp r4,0; cmpne r7,0; bne LAB_02092294
+                    // cmp r4,0; cmpne r7,0; bne LAB_02092294
                     else if (r4 !== 0 && r7 !== 0) {
                         branchToFail = true;
                     }
-                    // Mimics: cmp r4,0; cmpne r6,0; bne LAB_02092294
+                    // cmp r4,0; cmpne r6,0; bne LAB_02092294
                     else if (r4 !== 0 && r6 !== 0) {
                         branchToFail = true;
                     }
-                    // Mimics: cmp r5,0; cmpne r7,0; bne LAB_02092294
+                    // cmp r5,0; cmpne r7,0; bne LAB_02092294
                     else if (r5 !== 0 && r7 !== 0) {
                         branchToFail = true;
                     }
-                    // Mimics: cmp r5,0; cmpne r6,0; beq LAB_0209229c (Skip) -> Fallthrough to LAB_02092294
+                    // cmp r5,0; cmpne r6,0; beq LAB_0209229c (Skip) -> Fallthrough to LAB_02092294
                     else if (r5 !== 0 && r6 !== 0) {
                         branchToFail = true;
                     }
@@ -1000,11 +977,9 @@
                     }
                 }
 
-                // ------------------------------------------------------------
                 // Tile validation
-                // ------------------------------------------------------------
                 if (tile === 6) {
-                    // BUG FIX: Assembly does NOT increment the fail count for chests.
+                    // Assembly does NOT increment the fail count for chests
                     // 0209229c 06 00 50 e3     cmp r0,#0x6
                     // 020922a0 bb ff ff 0a     beq LAB_02092194
                     continue;
@@ -1013,15 +988,13 @@
                 tile -= 4;
 
                 if (tile >= 0 && tile <= 1) { // Tile 4 or 5 (Stairs)
-                    // Assembly DOES increment the fail count for stairs.
+                    // Assembly DOES increment the fail count for stairs
                     // 020922ac 01 80 88 92     addls r8,r8,#0x1
                     r8++;
                     continue;
                 }
 
-                // ------------------------------------------------------------
-                // Place chest
-                // ------------------------------------------------------------
+                // Place Chest
                 FUN_0209291c(mapGrid, chestX, chestY, TILE_CHEST);
 
                 const index = r9 & 0xFF;
@@ -1040,7 +1013,7 @@
             return 1;
         }
 
-        // --- Main Floor Generation ---
+        // Main Floor Generation Function
         function FUN_02090444(mapSeed, floor) {
             let hexSeed = mapSeed.toString(16).toUpperCase().padStart(4, "0");
             let base_seed = (mapSeed + floor) >>> 0;
@@ -1056,23 +1029,23 @@
             // Divide Area
             FUN_0209060c(mapContext, mapContext.field_14[0]);
 
-            // Rooms/Nodes
+            // Generate Rooms/Nodes
             for (let i = 0; i < mapContext.field_14.length; i++) {
                 let area = mapContext.field_14[i];
                 if (FUN_0209096c(mapContext, area) === 1) mapContext.field_10++;
             }
 
-            // Room Transformation
+            // Transform Rooms
             for (const area of mapContext.field_14) {
                 if (area.roomIndex !== undefined) FUN_02090b8c(mapContext, mapContext.field_1D4[area.roomIndex], area);
             }
 
-            // Corridors
+            // Generate Corridors
             for (let i = 0; i < mapContext.field_D4.length; i++) {
                 FUN_02091448(mapContext, mapContext.field_D4[i]);
             }
 
-            // Borders
+            // Fill Borders
             for (let x = 0; x < mapWidth; x++) {
                 FUN_0209291c(mapGrid, x, 0, TILE_WALL);
                 FUN_0209291c(mapGrid, x, mapHeight - 1, TILE_WALL);
@@ -1082,14 +1055,14 @@
                 FUN_0209291c(mapGrid, mapWidth - 1, y, TILE_WALL);
             }
 
-            // Stairs
+            // Generate Stairs
             FUN_02091bc0(mapContext);
 
             // Check floor limit (cmp r4,#0x2)
             if (floor <= 2) {
                 mapContext.field_0.chestCount = 0;
             } else {
-                // Chests
+                // Generate Chests
                 FUN_02092164(mapContext, floor);
             }
 
@@ -1102,12 +1075,7 @@
             }
         }
 
-        // ============================================================
-        // SECTION 2: SPRITE / SPAWN-NODE GRID
-        // (adapted from the sprite grid script — the dump textarea is
-        //  gone, tokens now come straight from bitfieldGrid above)
-        // ============================================================
-
+        // Separate AT LCG for Environment
         class LCG {
             constructor(seed) {
                 this.seed = seed >>> 0;
@@ -1132,8 +1100,8 @@
         const envIndices = { caves: 0, ruins: 1, ice: 2, water: 3, fire: 4 };
         const SPRITESHEET = "mapSprites.png";
 
-        // Layout tables formatted as 45 character hex strings (9 chars per environment: C, R, I, W, F)
-        // Mod table follows the order: [Caves, Ruins, Ice, Water, Fire]
+        // Layout: 9 chars per environment
+        // Mod: Caves, Ruins, Ice, Water, Fire
         const tileData = {
             'FF': { mod: [0,0,0,0,0], layout: "000000000000000000000000000000000000000000000"},
             'BB': { mod: [3,3,3,3,3], layout: "050050050050050050050050050050050050050050050"},
@@ -1227,7 +1195,7 @@
 
                 if (tileId !== 'FF' && tileData[tileId]) {
                     const r1 = lcg.next();
-                    lcg.next(); // r2 is advanced but not used per instructions
+                    lcg.next(); // unused
 
                     const modVal = tileData[tileId].mod[envInt];
                     const layoutStr = tileData[tileId].layout.substr(envInt * 9, 9);
@@ -1383,13 +1351,6 @@
             drawOverlapCanvas(markers);
         }
 
-        // Builds the 256-entry (16x16) bitfield token dump directly from
-        // the bitfieldGrid produced by FUN_02090444, instead of reading it
-        // from a pasted-in dump. The generated floor (mapWidth x mapHeight,
-        // which can be smaller than 16x16) is placed at the top-left of a
-        // fixed 16x16 token grid; every cell outside the generated area is
-        // left as 'FF' (no tile), matching the format the sprite grid
-        // expects.
         function buildBitfieldTokens() {
             const tokens = new Array(256).fill('FF');
             for (let y = 0; y < mapHeight && y < 16; y++) {
@@ -1486,10 +1447,6 @@
             wrapper.classList.toggle("show-subgrid", scale >= 0.999);
         }
 
-        // ============================================================
-        // SECTION 3: WIRING
-        // ============================================================
-
         function run() {
             const seedInput = document.getElementById('mapSeed').value;
             const seedStr = seedInput.replace(/^0x/i, "");
@@ -1509,7 +1466,9 @@
 
         document.getElementById('mapSeed').addEventListener('input', run);
         document.getElementById('floor').addEventListener('input', run);
+
         window.addEventListener("resize", scaleRenderedOutput);
+
         run();
     </script>
 </body>
