@@ -20,9 +20,27 @@
             padding: 15px;
             border-radius: 5px;
             margin-bottom: 20px;
-            display: inline-block;
+            display: grid;
+            grid-template-columns: auto auto;
+            gap: 10px 10px;
+            align-items: center;
         }
-        label { margin-right: 15px; font-size: 16px; }
+        .panel label {
+            text-align: right;
+            justify-self: end;
+            font-size: 16px;
+        }
+        .panel input {
+            width: 70px;
+            box-sizing: border-box;
+
+            background: #1e1e1e;
+            border: 1px solid #555;
+            color: #fff;
+            padding: 6px 8px;
+            font-family: monospace;
+            font-size: 16px;
+        }
         input {
             background: #1e1e1e;
             border: 1px solid #555;
@@ -35,6 +53,7 @@
             display: flex;
             flex-direction: column;
             align-items: center;
+            width: 100%;
         }
         .grid {
             display: grid;
@@ -49,15 +68,19 @@
             position: relative;
             width: 1024px;
             height: 1024px;
+
+            /* Scale uniformly */
+            transform-origin: top center;
         }
-        .grid-wrapper::after {
-            content: "";
+        .grid-scale-wrapper {
+            position: relative;
+        }
+        #majorGrid {
             position: absolute;
-            inset: 0;
+            left: 0;
+            top: 0;
             pointer-events: none;
-            background-image:
-                repeating-linear-gradient(to right, transparent 0, transparent 62px, rgba(0,0,0,1) 62px, rgba(0,0,0,1) 64px),
-                repeating-linear-gradient(to bottom, transparent 0, transparent 62px, rgba(0,0,0,1) 62px, rgba(0,0,0,1) 64px);
+            z-index: 100;
         }
         #overlapCanvas, #overlay {
             position: absolute;
@@ -78,14 +101,26 @@
             background-color: #e6ac43;
             image-rendering: pixelated;
         }
-        .sprite-cell::after {
+        .grid-wrapper.show-subgrid .sprite-cell::after {
             content: "";
             position: absolute;
             inset: 0;
             pointer-events: none;
             background-image:
-                repeating-linear-gradient(to right, transparent 0, transparent 7px, rgba(50,50,50,.6) 7px, rgba(50,50,50,.6) 8px),
-                repeating-linear-gradient(to bottom, transparent 0, transparent 7px, rgba(50,50,50,.6) 7px, rgba(50,50,50,.6) 8px);
+                repeating-linear-gradient(
+                    to right,
+                    transparent 0,
+                    transparent 7px,
+                    rgba(50,50,50,.6) 7px,
+                    rgba(50,50,50,.6) 8px
+                ),
+                repeating-linear-gradient(
+                    to bottom,
+                    transparent 0,
+                    transparent 7px,
+                    rgba(50,50,50,.6) 7px,
+                    rgba(50,50,50,.6) 8px
+                );
         }
         .sprite-cell.unknown {
             font-size: 12px;
@@ -98,15 +133,22 @@
 </head>
 <body>
     <div class="panel">
-        <label>Map Seed: <input type="text" id="mapSeed" value="0032" size="4" maxlength="4"></label>
-        <label>Floor: <input type="number" id="floor" min="1" max="16" value="1" style="width: 50px;"></label>
+        <label for="mapSeed">Map Seed:</label>
+        <input type="text" id="mapSeed" value="0032" maxlength="4">
+
+        <label for="floor">Floor:</label>
+        <input type="number" id="floor" min="1" max="16" value="1">
     </div>
 
     <div class="grid-container">
-        <div class="grid-wrapper">
-            <div class="grid" id="spriteGrid"></div>
-            <canvas id="overlapCanvas" width="1024" height="1024"></canvas>
-            <svg id="overlay" width="1024" height="1024" viewBox="0 0 1024 1024"></svg>
+        <div class="grid-scale-wrapper">
+            <div class="grid-wrapper">
+                <div class="grid" id="spriteGrid"></div>
+                <canvas id="overlapCanvas" width="1024" height="1024"></canvas>
+                <svg id="overlay" width="1024" height="1024" viewBox="0 0 1024 1024"></svg>
+            </div>
+
+            <svg id="majorGrid"></svg>
         </div>
     </div>
 
@@ -1391,6 +1433,59 @@
             drawCoordinateOverlay(coords);
         }
 
+        function drawMajorGrid(size) {
+            const svg = document.getElementById("majorGrid");
+
+            svg.innerHTML = "";
+            svg.setAttribute("width", size);
+            svg.setAttribute("height", size);
+            svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+
+            const cell = size / 16;
+
+            for (let i = 0; i <= 16; i++) {
+                const p = i * cell;
+
+                const v = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                v.setAttribute("x1", p);
+                v.setAttribute("y1", 0);
+                v.setAttribute("x2", p);
+                v.setAttribute("y2", size);
+                v.setAttribute("stroke", "black");
+                v.setAttribute("stroke-width", "2");
+
+                svg.appendChild(v);
+
+                const h = document.createElementNS("http://www.w3.org/2000/svg", "line");
+                h.setAttribute("x1", 0);
+                h.setAttribute("y1", p);
+                h.setAttribute("x2", size);
+                h.setAttribute("y2", p);
+                h.setAttribute("stroke", "black");
+                h.setAttribute("stroke-width", "2");
+
+                svg.appendChild(h);
+            }
+        }
+
+        function scaleRenderedOutput() {
+            const wrapper = document.querySelector(".grid-wrapper");
+            const outer = document.querySelector(".grid-scale-wrapper");
+
+            const displaySize = Math.min(window.innerWidth * 0.95, 1024);
+            const scale = displaySize / 1024;
+
+            wrapper.style.transform = `scale(${scale})`;
+            wrapper.style.transformOrigin = "top left";
+
+            outer.style.width = `${displaySize}px`;
+            outer.style.height = `${displaySize}px`;
+
+            drawMajorGrid(displaySize);
+
+            wrapper.classList.toggle("show-subgrid", scale >= 0.999);
+        }
+
         // ============================================================
         // SECTION 3: WIRING
         // ============================================================
@@ -1409,11 +1504,12 @@
 
             const tokens = buildBitfieldTokens();
             renderSpriteGrid(seedStr, floor, tokens);
+            scaleRenderedOutput();
         }
 
         document.getElementById('mapSeed').addEventListener('input', run);
         document.getElementById('floor').addEventListener('input', run);
-
+        window.addEventListener("resize", scaleRenderedOutput);
         run();
     </script>
 </body>
