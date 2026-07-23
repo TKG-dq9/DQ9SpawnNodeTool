@@ -1439,7 +1439,12 @@
         document.getElementById('mapSeed').addEventListener('input', run);
         document.getElementById('floor').addEventListener('input', run);
 
-        window.addEventListener("resize", scaleRenderedOutput);
+        let resizeTimer;
+
+        window.addEventListener("resize", () => {
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(scaleRenderedOutput, 100);
+        });
 
         run();
     </script>
