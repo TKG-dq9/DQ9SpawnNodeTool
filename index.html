@@ -1316,38 +1316,10 @@
                 group.appendChild(h);
                 group.appendChild(v);
 
-                markers.push({ px, py, r: 3.5 * PIXELS_PER_UNIT, circle, h, v });
+                markers.push({ px, py, r: 3.5 * PIXELS_PER_UNIT });
                 overlay.appendChild(group);
             });
 
-            overlay.onmousemove = (e) => {
-                const pt = overlay.createSVGPoint();
-                pt.x = e.clientX;
-                pt.y = e.clientY;
-                const p = pt.matrixTransform(overlay.getScreenCTM().inverse());
-
-                markers.forEach(m => {
-                    const dx = p.x - m.px;
-                    const dy = p.y - m.py;
-                    if (dx * dx + dy * dy <= m.r * m.r) {
-                        m.circle.setAttribute("stroke", "#00cf00");
-                        m.h.setAttribute("stroke", "#00cf00");
-                        m.v.setAttribute("stroke", "#00cf00");
-                    } else {
-                        m.circle.setAttribute("stroke", "#404040");
-                        m.h.setAttribute("stroke", "#404040");
-                        m.v.setAttribute("stroke", "#404040");
-                    }
-                });
-            };
-
-            overlay.onmouseleave = () => {
-                markers.forEach(m => {
-                    m.circle.setAttribute("stroke", "#404040");
-                    m.h.setAttribute("stroke", "#404040");
-                    m.v.setAttribute("stroke", "#404040");
-                });
-            };
             drawOverlapCanvas(markers);
         }
 
@@ -1413,7 +1385,7 @@
                 v.setAttribute("x2", p);
                 v.setAttribute("y2", size);
                 v.setAttribute("stroke", "black");
-                v.setAttribute("stroke-width", "2");
+                v.setAttribute("stroke-width", size >= 1024 ? "2" : "1");
 
                 svg.appendChild(v);
 
@@ -1423,7 +1395,7 @@
                 h.setAttribute("x2", size);
                 h.setAttribute("y2", p);
                 h.setAttribute("stroke", "black");
-                h.setAttribute("stroke-width", "2");
+                h.setAttribute("stroke-width", size >= 1024 ? "2" : "1");
 
                 svg.appendChild(h);
             }
