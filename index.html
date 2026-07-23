@@ -1462,10 +1462,10 @@
 
                 // 2. Draw the UP/DN text
                 const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                text.setAttribute("x", "-1");
-                text.setAttribute("y", "4");
+                text.setAttribute("x", "0");
+                text.setAttribute("y", "0");
                 text.setAttribute("text-anchor", "middle");
-                text.setAttribute("alignment-baseline", "middle");
+                text.setAttribute("dy", ".35em");
                 text.setAttribute("font-family", "monospace");
                 text.setAttribute("font-size", "15");
                 text.setAttribute("font-weight", "bold");
@@ -1527,10 +1527,10 @@
 
                     // 2. Draw chest index (1 to 3)
                     const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
-                    text.setAttribute("x", "-1");
-                    text.setAttribute("y", "4");
+                    text.setAttribute("x", "0");
+                    text.setAttribute("y", "0");
                     text.setAttribute("text-anchor", "middle");
-                    text.setAttribute("alignment-baseline", "middle");
+                    text.setAttribute("dy", ".35em");
                     text.setAttribute("font-family", "monospace");
                     text.setAttribute("font-size", "15");
                     text.setAttribute("font-weight", "bold");
