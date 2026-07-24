@@ -80,14 +80,15 @@
             pointer-events: none;
             z-index: 100;
         }
-        #overlapCanvas, #overlay {
+        #overlapCanvas, #overlay, #topOverlay {
             position: absolute;
             left: 0px;
             top: 0px;
             pointer-events: none;
-            z-index: 1;
         }
+        #overlapCanvas { z-index: 1; }
         #overlay { z-index: 2; }
+        #topOverlay { z-index: 101; }
         #overlay circle, #overlay line {
             pointer-events: visiblePainted;
         }
@@ -145,8 +146,8 @@
                 <canvas id="overlapCanvas" width="1024" height="1024"></canvas>
                 <svg id="overlay" width="1024" height="1024" viewBox="0 0 1024 1024"></svg>
             </div>
-
             <svg id="majorGrid"></svg>
+            <svg id="topOverlay" width="1024" height="1024" viewBox="0 0 1024 1024"></svg>
         </div>
     </div>
 
@@ -1296,6 +1297,65 @@
             return coords;
         }
 
+        function calculateChestCoords(seedHex, floor, envString) {
+            const mapSeed = parseInt(seedHex, 16) || 0;
+            const seed = (mapSeed + floor) >>> 0;
+            const lcg = new LCG(seed);
+
+            const envInt = envIndices[envString];
+            const results = [];
+
+            const chestCoords = mapContext && mapContext.field_0 && mapContext.field_0._chestCoords;
+            if (!chestCoords) return results;
+
+            chestCoords.forEach((chest, index) => {
+                const r1 = lcg.next();
+                lcg.next(); // unused
+
+                if (!chest) { results[index] = null; return; }
+
+                const { x, y } = chest;
+                if (y < 0 || y >= bitfieldGrid.length || x < 0 || x >= bitfieldGrid[y].length) {
+                    results[index] = null;
+                    return;
+                }
+
+                const tileId = bitfieldGrid[y][x].toString(16).toUpperCase().padStart(2, '0');
+                const data = tileData[tileId];
+                if (!data) { results[index] = null; return; }
+
+                const modVal = data.mod[envInt];
+                const layoutStr = data.layout.substr(envInt * 9, 9);
+
+                const nonZeroIndices = [];
+                for (let j = 0; j < 9; j++) {
+                    if (layoutStr[j] !== '0') nonZeroIndices.push(j);
+                }
+                if (nonZeroIndices.length === 0) { results[index] = null; return; }
+
+                const chosenIndex = nonZeroIndices[r1 % modVal];
+
+                const baseX = (x * 8 + 4) * 0x1000;
+                const baseZ = (y * 8 + 4) * 0x1000;
+
+                let modX = 0, modZ = 0;
+                if (['E3', '8F', '3E', 'F8'].includes(tileId)) {
+                    modX = exceptions[chosenIndex].x;
+                    modZ = exceptions[chosenIndex].z;
+                } else {
+                    modX = modifiers[chosenIndex].x;
+                    modZ = modifiers[chosenIndex].z;
+                }
+
+                const finalX = (baseX + modX) >> 12;
+                const finalZ = (baseZ + modZ) >> 12;
+
+                results[index] = { x: finalX, z: finalZ };
+            });
+
+            return results;
+        }
+
         function drawOverlapCanvas(markers) {
             const canvas = document.getElementById("overlapCanvas");
             const ctx = canvas.getContext("2d");
@@ -1342,9 +1402,11 @@
             ctx.drawImage(countCanvas, 0, 0);
         }
 
-        function drawCoordinateOverlay(coords, stairsCoords) {
+        function drawCoordinateOverlay(coords, stairsCoords, chestCoords) {
             const overlay = document.getElementById("overlay");
+            const topOverlay = document.getElementById("topOverlay");
             overlay.innerHTML = "";
+            topOverlay.innerHTML = "";
             const markers = [];
             const PIXELS_PER_UNIT = 8;
 
@@ -1384,6 +1446,9 @@
 
             drawOverlapCanvas(markers);
 
+            const boxesGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+            const textGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+
             // Draw stairs coordinate markers: 16x16px squares (2x2 grid units)
             if (stairsCoords) {
                 const STAIR_SQUARE_PX = 15;
@@ -1410,9 +1475,49 @@
                     rect.setAttribute("stroke", style.stroke);
                     rect.setAttribute("stroke-width", "1");
 
-                    overlay.appendChild(rect);
+                    boxesGroup.appendChild(rect);
                 });
             }
+
+            // Draw chest coordinate markers: 2x2 grid-unit squares with index number
+            if (chestCoords) {
+                const CHEST_SQUARE_PX = 15;
+                const half = Math.ceil(CHEST_SQUARE_PX / 2);
+                const chestStyle = { stroke: "#ffff00", fill: "rgba(255,255,0,1)" };
+
+                chestCoords.forEach((c, index) => {
+                    if (!c) return;
+
+                    const px = c.x * PIXELS_PER_UNIT;
+                    const py = c.z * PIXELS_PER_UNIT;
+
+                    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                    rect.setAttribute("x", px - half);
+                    rect.setAttribute("y", py - half);
+                    rect.setAttribute("width", CHEST_SQUARE_PX);
+                    rect.setAttribute("height", CHEST_SQUARE_PX);
+                    rect.setAttribute("fill", chestStyle.fill);
+                    rect.setAttribute("stroke", chestStyle.stroke);
+                    rect.setAttribute("stroke-width", "1");
+                    boxesGroup.appendChild(rect);
+
+                    const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
+                    text.setAttribute("x", px);
+                    text.setAttribute("y", py);
+                    text.setAttribute("text-anchor", "middle");
+                    text.setAttribute("dy", ".35em");
+                    text.setAttribute("font-family", "monospace");
+                    text.setAttribute("font-size", "15");
+                    text.setAttribute("font-weight", "bold");
+                    text.setAttribute("fill", "#000000");
+                    text.textContent = (index + 1).toString();
+                    text.style.pointerEvents = "none";
+                    textGroup.appendChild(text);
+                });
+            }
+            
+            topOverlay.appendChild(boxesGroup);
+            topOverlay.appendChild(textGroup);
         }
 
         function buildBitfieldTokens() {
@@ -1456,8 +1561,13 @@
 
             const stairsCoords = calculateStairsCoords(seedHex, envString);
             mapContext.stairsCoords = stairsCoords;
+
+            const chestCoords = calculateChestCoords(seedHex, floor, envString);
+            mapContext.chestCoords = chestCoords;
+
             const coords = calculateCoords(tokens, envString, floor);
-            drawCoordinateOverlay(coords, stairsCoords);
+
+            drawCoordinateOverlay(coords, stairsCoords, chestCoords);
         }
 
         function drawMajorGrid(size) {
@@ -1497,6 +1607,7 @@
 
         function scaleRenderedOutput() {
             const wrapper = document.querySelector(".grid-wrapper");
+            const topOverlay = document.getElementById("topOverlay");
             const outer = document.querySelector(".grid-scale-wrapper");
 
             const displaySize = Math.min(window.innerWidth * 0.95, 1024);
@@ -1504,6 +1615,9 @@
 
             wrapper.style.transform = `scale(${scale})`;
             wrapper.style.transformOrigin = "top left";
+            
+            topOverlay.style.transform = `scale(${scale})`;
+            topOverlay.style.transformOrigin = "top left";
 
             outer.style.width = `${displaySize}px`;
             outer.style.height = `${displaySize}px`;
@@ -1515,6 +1629,7 @@
 
         function drawStairsOverlay() {
             const overlay = document.getElementById("overlay");
+            const topOverlay = document.getElementById("topOverlay");
             const PIXELS_PER_UNIT = 8;
 
             // Returns true if a tile is a Wall (1), Divider (3), or out of bounds (-1)
@@ -1579,8 +1694,8 @@
 
                 fineGroup.appendChild(arrowGroup);
                 fineGroup.appendChild(text);
-                group.appendChild(fineGroup);
 
+                topOverlay.appendChild(fineGroup); 
                 overlay.appendChild(group);
             };
 
@@ -1636,7 +1751,7 @@
                     text.style.pointerEvents = "none";
 
                     group.appendChild(rect);
-                    group.appendChild(text);
+                    //group.appendChild(text);
                     overlay.appendChild(group);
                 }
             }
