@@ -1189,6 +1189,64 @@
             return 'fire';
         }
 
+        function calculateStairsCoords(seedHex, envString) {
+            const seed = parseInt(seedHex, 16) || 0;
+            const lcg = new LCG(seed);
+            const r1 = lcg.next();
+
+            const envInt = envIndices[envString];
+            const results = {};
+
+            const stairEntries = [
+                { key: 'up',   pos: mapContext && mapContext.upStairs },
+                { key: 'down', pos: mapContext && mapContext.downStairs }
+            ];
+
+            stairEntries.forEach(entry => {
+                const pos = entry.pos;
+                if (!pos) return;
+
+                const { x, y } = pos;
+                if (y < 0 || y >= bitfieldGrid.length || x < 0 || x >= bitfieldGrid[y].length) return;
+
+                const tileId = bitfieldGrid[y][x].toString(16).toUpperCase().padStart(2, '0');
+                const data = tileData[tileId];
+                if (!data) return;
+
+                const modVal = data.mod[envInt];
+                const layoutStr = data.layout.substr(envInt * 9, 9);
+
+                const nonZeroIndices = [];
+                for (let j = 0; j < 9; j++) {
+                    if (layoutStr[j] !== '0') nonZeroIndices.push(j);
+                }
+                if (nonZeroIndices.length === 0) return;
+
+                const chosenIndex = nonZeroIndices[r1 % modVal];
+
+                // x/y here are the tile's column/row within the 16-wide tile grid,
+                // equivalent to xNibble/zNibble in calculateCoords.
+                const baseX = (x * 8 + 4) * 0x1000;
+                const baseZ = (y * 8 + 4) * 0x1000;
+
+                let modX = 0, modZ = 0;
+                if (['E3', '8F', '3E', 'F8'].includes(tileId)) {
+                    modX = exceptions[chosenIndex].x;
+                    modZ = exceptions[chosenIndex].z;
+                } else {
+                    modX = modifiers[chosenIndex].x;
+                    modZ = modifiers[chosenIndex].z;
+                }
+
+                const finalX = (baseX + modX) >> 12;
+                const finalZ = (baseZ + modZ) >> 12;
+
+                results[entry.key] = { x: finalX, z: finalZ };
+            });
+
+            return results;
+        }
+
         function calculateCoords(tokens, envString, currentFloor) {
             const lcg = new LCG(parseInt(currentFloor, 10) || 1);
             const coords = [];
@@ -1284,7 +1342,7 @@
             ctx.drawImage(countCanvas, 0, 0);
         }
 
-        function drawCoordinateOverlay(coords) {
+        function drawCoordinateOverlay(coords, stairsCoords) {
             const overlay = document.getElementById("overlay");
             overlay.innerHTML = "";
             const markers = [];
@@ -1325,6 +1383,36 @@
             });
 
             drawOverlapCanvas(markers);
+
+            // Draw stairs coordinate markers: 16x16px squares (2x2 grid units)
+            if (stairsCoords) {
+                const STAIR_SQUARE_PX = 15;
+                const half = Math.ceil(STAIR_SQUARE_PX / 2);
+                const stairStyles = {
+                    up:   { stroke: "#00ff00", fill: "rgba(0  , 255, 0  , .5)" },
+                    down: { stroke: "#ff0000", fill: "rgba(255, 0  , 0  , .5)" }
+                };
+
+                Object.keys(stairStyles).forEach(key => {
+                    const c = stairsCoords[key];
+                    if (!c) return;
+                    const style = stairStyles[key];
+
+                    const px = c.x * PIXELS_PER_UNIT;
+                    const py = c.z * PIXELS_PER_UNIT;
+
+                    const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+                    rect.setAttribute("x", px - half);
+                    rect.setAttribute("y", py - half);
+                    rect.setAttribute("width", STAIR_SQUARE_PX);
+                    rect.setAttribute("height", STAIR_SQUARE_PX);
+                    rect.setAttribute("fill", style.fill);
+                    rect.setAttribute("stroke", style.stroke);
+                    rect.setAttribute("stroke-width", "1");
+
+                    overlay.appendChild(rect);
+                });
+            }
         }
 
         function buildBitfieldTokens() {
@@ -1366,8 +1454,10 @@
                 gridContainer.appendChild(cell);
             }
 
+            const stairsCoords = calculateStairsCoords(seedHex, envString);
+            mapContext.stairsCoords = stairsCoords;
             const coords = calculateCoords(tokens, envString, floor);
-            drawCoordinateOverlay(coords);
+            drawCoordinateOverlay(coords, stairsCoords);
         }
 
         function drawMajorGrid(size) {
@@ -1425,11 +1515,12 @@
 
         function drawStairsOverlay() {
             const overlay = document.getElementById("overlay");
-            
+            const PIXELS_PER_UNIT = 8;
+
             // Returns true if a tile is a Wall (1), Divider (3), or out of bounds (-1)
             const isSolid = t => t === TILE_WALL || t === TILE_DIVIDER || t === -1;
 
-            const drawStair = (x, y, tile) => {
+            const drawStair = (x, y, tile, fineCoord) => {
                 // Mimic the exact priority check from the assembly dump
                 let facing = 'S';
                 if (!isSolid(FUN_02092934(mapContext, x, y + 1))) facing = 'S';
@@ -1437,30 +1528,36 @@
                 else if (!isSolid(FUN_02092934(mapContext, x - 1, y))) facing = 'W';
                 else if (!isSolid(FUN_02092934(mapContext, x, y - 1))) facing = 'N';
 
-                // Base coordinates (centered in the 64x64 cell)
+                // Tile-center coords (still used for the big highlight box)
                 const px = x * 64 + 32;
                 const py = y * 64 + 32;
 
-                // Set SVG Rotation for the arrow based on facing
+                // Fine (2x2 box) coords — used for the U/D text and arrow now
+                const fx = fineCoord ? fineCoord.x * PIXELS_PER_UNIT : px;
+                const fy = fineCoord ? fineCoord.z * PIXELS_PER_UNIT : py;
+
                 let rotation = 0;
                 if (facing === 'E') rotation = -90;
                 else if (facing === 'W') rotation = 90;
                 else if (facing === 'N') rotation = 180;
 
                 const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
-                group.setAttribute("transform", `translate(${px}, ${py})`);
 
-                // 1. Draw the box
+                // 1. Highlight box — stays tile-centered
                 const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-                rect.setAttribute("x", "-32");
-                rect.setAttribute("y", "-32");
-                rect.setAttribute("width", "63");
-                rect.setAttribute("height", "63");
-                rect.setAttribute("fill", tile === TILE_UP_STAIRS ? "rgba(0, 255, 0, 0.33)" : "rgba(255, 0, 0, 0.33)");
+                rect.setAttribute("x", px - 31);
+                rect.setAttribute("y", py - 31);
+                rect.setAttribute("width", "62");
+                rect.setAttribute("height", "62");
+                rect.setAttribute("fill", tile === TILE_UP_STAIRS ? "rgba(0, 255, 0, 0.0)" : "rgba(255, 0, 0, 0.0)");
                 rect.setAttribute("stroke", tile === TILE_UP_STAIRS ? "#00ff00" : "#ff0000");
-                rect.setAttribute("stroke-width", "0");
+                rect.setAttribute("stroke-width", "3");
+                group.appendChild(rect);
 
-                // 2. Draw the UP/DN text
+                // 2 & 3. Text + arrow — now centered on the fine 2x2 box
+                const fineGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
+                fineGroup.setAttribute("transform", `translate(${fx}, ${fy})`);
+
                 const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
                 text.setAttribute("x", "0");
                 text.setAttribute("y", "0");
@@ -1473,28 +1570,27 @@
                 text.textContent = tile === TILE_UP_STAIRS ? "U" : "D";
                 text.style.pointerEvents = "none";
 
-                // 3. Draw the Arrow indicating direction
                 const arrowGroup = document.createElementNS("http://www.w3.org/2000/svg", "g");
                 arrowGroup.setAttribute("transform", `rotate(${rotation})`);
                 const arrow = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-                // Polygon points downward initially (representing South)
                 arrow.setAttribute("points", "-6,10 6,10 0,20");
                 arrow.setAttribute("fill", "#000000");
                 arrowGroup.appendChild(arrow);
 
-                // Compile and attach
-                group.appendChild(rect);
-                group.appendChild(arrowGroup);
-                group.appendChild(text);
+                fineGroup.appendChild(arrowGroup);
+                fineGroup.appendChild(text);
+                group.appendChild(fineGroup);
+
                 overlay.appendChild(group);
             };
 
-            // Rely on the final tracked coordinates instead of sweeping the mapGrid
+            const stairsCoords = mapContext && mapContext.stairsCoords;
+
             if (mapContext && mapContext.upStairs) {
-                drawStair(mapContext.upStairs.x, mapContext.upStairs.y, TILE_UP_STAIRS);
+                drawStair(mapContext.upStairs.x, mapContext.upStairs.y, TILE_UP_STAIRS, stairsCoords && stairsCoords.up);
             }
             if (mapContext && mapContext.downStairs) {
-                drawStair(mapContext.downStairs.x, mapContext.downStairs.y, TILE_DOWN_STAIRS);
+                drawStair(mapContext.downStairs.x, mapContext.downStairs.y, TILE_DOWN_STAIRS, stairsCoords && stairsCoords.down);
             }
         }
 
@@ -1518,12 +1614,13 @@
 
                     // 1. Draw yellow box
                     const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
-                    rect.setAttribute("x", "-32");
-                    rect.setAttribute("y", "-32");
-                    rect.setAttribute("width", "63");
-                    rect.setAttribute("height", "63");
-                    rect.setAttribute("fill", "rgba(255, 255, 0, 0.33)");
-                    rect.setAttribute("stroke-width", "0");
+                    rect.setAttribute("x", "-31");
+                    rect.setAttribute("y", "-31");
+                    rect.setAttribute("width", "62");
+                    rect.setAttribute("height", "62");
+                    rect.setAttribute("fill", "rgba(255, 255, 0, 0.0)");
+                    rect.setAttribute("stroke", "#ffff00");
+                    rect.setAttribute("stroke-width", "3");
 
                     // 2. Draw chest index (1 to 3)
                     const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
